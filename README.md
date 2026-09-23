@@ -38,6 +38,18 @@ npm run typecheck
 
 The API creates the `backgammon` database and its tables on first start. To use another Postgres, set `DATABASE_URL` (see `.env.example`). In development the web app proxies `/api` to the API, so both run on one address.
 
+### Using a Postgres you already run
+
+If a Postgres is already listening on port 5432 (Homebrew, Postgres.app, another project's container), skip `npm run db:up`: its container needs the same port and won't start. The default `DATABASE_URL` signs in as `postgres` / `postgres`, a role that Homebrew and Postgres.app don't create. They make one named after your system user, with no password. Point the API at that role in `.env`:
+
+```bash
+cp .env.example .env
+# then in .env:
+DATABASE_URL=postgres://your-username@localhost:5432/backgammon
+```
+
+Your role needs permission to create databases (Homebrew's and Postgres.app's default role has it). Otherwise, create `backgammon` yourself with `createdb backgammon` first.
+
 Open http://localhost:5173 in two different browsers (or one normal and one private window) to play yourself.
 
 ## Setting up Google sign-in
