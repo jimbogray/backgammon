@@ -56,6 +56,12 @@ If someone signs in with Google using the same verified email as an existing pas
 
 ## Deploying
 
+### Azure staging
+
+Merging to `main` deploys to the Azure **staging** environment (App Service running the Docker image, SQLite on its persistent `/home` storage) through GitHub Actions. One-time setup and operating notes are in [`infra/README.md`](infra/README.md).
+
+### Elsewhere
+
 The app is a single Node process plus one SQLite file, so any host that gives you a persistent disk works (Fly.io, Railway, Render with a disk, a small VPS).
 
 ```bash
