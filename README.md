@@ -5,7 +5,7 @@ Two-player online backgammon. Sign up (or continue with Google), challenge a fri
 ## Features
 
 - **Accounts**: sign up with username, email and password, or one-click Google sign-in. The landing page is the sign-up / log-in screen until you're signed in.
-- **Saved, resumable games**: the server stores each game's full position, dice, doubling cube and move history in SQLite.
+- **Saved, resumable games**: the API stores each game's full position, dice, doubling cube and move history in Postgres.
 - **Live or turn-by-turn**: when both players have the game open, moves appear instantly (Server-Sent Events). When they don't, the lobby shows which games are waiting on you.
 - **Many games at once**: the lobby groups games into *Your turn*, *Waiting for opponent*, *Finished* and open invites.
 - **Full rules**: bar entry, hitting, blocked points, must-use-both-dice and larger-die rules, bearing off, doubling cube (take / pass), gammons and backgammons, resignation. The server checks every move; the browser only shows moves the rules allow.
@@ -15,23 +15,28 @@ Two-player online backgammon. Sign up (or continue with Google), challenge a fri
 
 | Piece | Choice |
 | --- | --- |
-| Server | Node.js 20+, Express 5, TypeScript |
-| Database | SQLite via `better-sqlite3` (a single file, no separate database server) |
-| Client | React 19 + Vite, board drawn in SVG |
-| Real-time | Server-Sent Events |
-| Auth | bcrypt password hashes, random session tokens in an HTTP-only cookie, Google OAuth 2.0 (no extra auth library) |
-| Tests | Vitest + Supertest |
+| Web app | React 19 + Vite, board drawn in SVG. A static site (Azure Static Web Apps in staging) |
+| API | Node.js 20+, Express 5, TypeScript. A container (Azure Container Apps in staging) |
+| Database | Postgres via `pg` (Azure Database for PostgreSQL in staging) |
+| Real-time | Server-Sent Events; Postgres `LISTEN`/`NOTIFY` fans updates out across API replicas |
+| Auth | bcrypt password hashes, random session tokens sent as `Authorization: Bearer`, Google OAuth 2.0 (no extra auth library) |
+| Tests | Vitest + Supertest, against Postgres in-process via PGlite |
 
-The rules engine in `src/shared/engine.ts` is shared by the server (authoritative) and the browser (move highlighting).
+The web app and API are deployed separately and talk over HTTPS. The rules engine in `src/shared/engine.ts` is shared by the API (authoritative) and the browser (move highlighting).
 
 ## Running locally
 
+You need Node 20+ and a Postgres. The easiest Postgres is Docker:
+
 ```bash
 npm install
-npm run dev          # server on :3000, app on http://localhost:5173
-npm test             # rules engine and API tests
+npm run db:up        # Postgres 17 on localhost:5432 (docker compose)
+npm run dev          # API on :3000, web app on http://localhost:5173
+npm test             # rules engine and API tests (no database needed)
 npm run typecheck
 ```
+
+The API creates the `backgammon` database and its tables on first start. To use another Postgres, set `DATABASE_URL` (see `.env.example`). In development the web app proxies `/api` to the API, so both run on one address.
 
 Open http://localhost:5173 in two different browsers (or one normal and one private window) to play yourself.
 
@@ -41,53 +46,37 @@ Google sign-in stays hidden until you add credentials:
 
 1. In the [Google Cloud console](https://console.cloud.google.com/apis/credentials), create a project (or pick one), then configure the **OAuth consent screen** (External, app name, your email; scopes `openid`, `email`, `profile`).
 2. Create an **OAuth client ID** of type **Web application**.
-3. Under **Authorized redirect URIs** add `APP_URL/auth/google/callback` for each place the app runs, for example:
-   - `http://localhost:5173/auth/google/callback` (local development)
-   - `https://your-domain.example/auth/google/callback` (production)
+3. Under **Authorized redirect URIs** add `API_URL/api/auth/google/callback` for each place the API runs, for example:
+   - `http://localhost:5173/api/auth/google/callback` (local development, through the web app's proxy)
+   - `https://api.your-domain.example/api/auth/google/callback` (production)
 4. Copy `.env.example` to `.env` and fill in:
    ```
    GOOGLE_CLIENT_ID=...apps.googleusercontent.com
    GOOGLE_CLIENT_SECRET=...
    APP_URL=http://localhost:5173
    ```
-5. Restart the server. The log line says `Google sign-in: enabled` and the button appears.
+5. Restart the API. The log line says `Google sign-in: enabled` and the button appears.
 
 If someone signs in with Google using the same verified email as an existing password account, the two are linked. Google users get a username from their name and can change it by clicking it in the header.
 
 ## Deploying
 
-### Azure staging
+Merging to `main` deploys to the Azure **staging** environment through GitHub Actions: the web app to Azure Static Web Apps, the API to Azure Container Apps, and the database on Azure Database for PostgreSQL. One-time setup, costs and operating notes are in [`infra/README.md`](infra/README.md).
 
-Merging to `main` deploys to the Azure **staging** environment (App Service running the Docker image, SQLite on its persistent `/home` storage) through GitHub Actions. One-time setup and operating notes are in [`infra/README.md`](infra/README.md).
+Elsewhere, the pieces are:
 
-### Elsewhere
+- **API:** `docker build -t backgammon-api .` (or `npm run build:api && npm start`). Set `APP_URL` (the web app's address, allowed by CORS), `API_URL` (its own public address, for Google sign-in), `DATABASE_URL`, and optionally the Google credentials.
+- **Web app:** `VITE_API_URL=https://api.your-domain.example npm run build:web`, then serve `dist/client` from any static host. Unknown paths must fall back to `index.html`; `staticwebapp.config.json` does this on Azure.
 
-The app is a single Node process plus one SQLite file, so any host that gives you a persistent disk works (Fly.io, Railway, Render with a disk, a small VPS).
-
-```bash
-npm ci
-npm run build
-NODE_ENV=production APP_URL=https://your-domain.example DATABASE_PATH=/data/backgammon.db npm start
-```
-
-Or with Docker:
-
-```bash
-docker build -t backgammon .
-docker run -p 3000:3000 -v backgammon-data:/data \
-  -e APP_URL=https://your-domain.example \
-  -e GOOGLE_CLIENT_ID=... -e GOOGLE_CLIENT_SECRET=... \
-  backgammon
-```
-
-Serve it over HTTPS in production: session cookies are marked `Secure` when `NODE_ENV=production`. Live updates are held in memory, so run a single instance (moving to Postgres plus a shared pub/sub would be the step for scaling out).
+Serve both over HTTPS in production.
 
 ## Project layout
 
 ```
 src/shared/engine.ts   rules engine (moves, dice, cube, scoring)
 src/shared/api.ts      JSON shapes shared by server and client
-src/server/            Express app: auth, games API, live events, SQLite
-src/client/            React app: sign-in, lobby, invite, game board
+src/server/            Express API: auth, games, live events, Postgres
+src/client/            React web app: sign-in, lobby, invite, game board
+infra/                 Azure Bicep templates and setup notes
 tests/                 engine and API tests
 ```

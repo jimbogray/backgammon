@@ -7,8 +7,8 @@ import { useGameEvents } from '../events';
 import { Header } from '../components/Header';
 import { CopyButton } from '../components/CopyButton';
 
-function timeAgo(sqlTime: string): string {
-  const then = new Date(sqlTime.replace(' ', 'T') + 'Z').getTime();
+function timeAgo(isoTime: string): string {
+  const then = new Date(isoTime).getTime();
   const s = Math.max(0, Math.round((Date.now() - then) / 1000));
   if (s < 60) return 'just now';
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;

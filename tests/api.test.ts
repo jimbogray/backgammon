@@ -1,16 +1,19 @@
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/server/app';
 import type { Config } from '../src/server/config';
-import { openDatabase } from '../src/server/db';
+import { EventHub } from '../src/server/events';
 import type { GameView } from '../src/shared/api';
 import { availableMoves, Roller } from '../src/shared/engine';
+import { createTestDatabase } from './testDb';
 
 const baseConfig: Config = {
   port: 0,
   appUrl: 'http://localhost:5173',
-  databasePath: ':memory:',
-  databaseJournalMode: 'wal',
+  apiUrl: 'http://localhost:5173',
+  corsOrigins: ['http://localhost:5173'],
+  databaseUrl: 'unused',
+  databaseAuth: 'password',
   isProduction: false,
   google: null,
 };
@@ -20,24 +23,42 @@ function cycleRoller(values: number[]): Roller {
   return () => values[i++ % values.length];
 }
 
-function makeApp(opts: { config?: Partial<Config>; fetch?: typeof fetch; roll?: Roller } = {}) {
-  const db = openDatabase(':memory:');
+let db: Awaited<ReturnType<typeof createTestDatabase>>;
+beforeAll(async () => {
+  db = await createTestDatabase();
+});
+afterAll(async () => {
+  await db.close();
+});
+beforeEach(async () => {
+  await db.reset();
+});
+
+function makeApp(opts: { config?: Partial<Config>; fetch?: typeof fetch; roll?: Roller; hub?: EventHub } = {}) {
   const app = createApp({
     db,
     config: { ...baseConfig, ...opts.config },
     roll: opts.roll ?? cycleRoller([3, 1, 5, 2, 6, 4]),
     fetch: opts.fetch,
+    hub: opts.hub,
   });
   return { app, db };
 }
 
-async function signup(app: ReturnType<typeof makeApp>['app'], username: string) {
-  const agent = request.agent(app);
-  const res = await agent
+type App = ReturnType<typeof makeApp>['app'];
+
+/** A client that sends the given session token on every request, like the browser app does. */
+function withToken(app: App, token: string) {
+  return request.agent(app).set('Authorization', `Bearer ${token}`);
+}
+
+async function signup(app: App, username: string) {
+  const res = await request(app)
     .post('/api/auth/signup')
     .send({ username, email: `${username}@example.com`, password: 'correct horse' });
   expect(res.status).toBe(201);
-  return agent;
+  expect(typeof res.body.token).toBe('string');
+  return withToken(app, res.body.token);
 }
 
 describe('health check', () => {
@@ -66,10 +87,29 @@ describe('accounts', () => {
     await agent.post('/api/auth/logout').send({});
     expect((await agent.get('/api/me')).status).toBe(401);
 
-    const bad = await agent.post('/api/auth/login').send({ login: 'alice', password: 'nope' });
+    const bad = await request(app).post('/api/auth/login').send({ login: 'alice', password: 'nope' });
     expect(bad.status).toBe(401);
-    expect((await agent.post('/api/auth/login').send({ login: 'alice@example.com', password: 'correct horse' })).status).toBe(200);
-    expect((await agent.get('/api/me')).body.user.username).toBe('alice');
+    const good = await request(app).post('/api/auth/login').send({ login: 'ALICE@example.com', password: 'correct horse' });
+    expect(good.status).toBe(200);
+    expect((await withToken(app, good.body.token).get('/api/me')).body.user.username).toBe('alice');
+  });
+
+  it('ignores unknown tokens', async () => {
+    expect((await withToken(app, 'forged').get('/api/me')).status).toBe(401);
+  });
+
+  it('allows the web app origin through CORS and no other', async () => {
+    const preflight = await request(app)
+      .options('/api/games')
+      .set('Origin', 'http://localhost:5173')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'authorization, content-type');
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+    expect(preflight.headers['access-control-allow-headers']).toMatch(/Authorization/);
+
+    const other = await request(app).get('/api/auth/providers').set('Origin', 'https://evil.example');
+    expect(other.headers['access-control-allow-origin']).toBeUndefined();
   });
 
   it('rejects duplicate usernames and weak passwords', async () => {
@@ -96,7 +136,7 @@ describe('accounts', () => {
 
   it('reports Google as disabled without credentials', async () => {
     expect((await request(app).get('/api/auth/providers')).body).toEqual({ google: false });
-    expect((await request(app).get('/auth/google')).status).toBe(404);
+    expect((await request(app).get('/api/auth/google')).status).toBe(404);
   });
 });
 
@@ -116,33 +156,51 @@ describe('Google sign-in', () => {
     }) as typeof fetch;
   }
 
-  it('redirects to Google, then creates an account on callback', async () => {
+  /** Follows the browser through /api/auth/google and back, returning where the API sent it. */
+  async function googleRoundTrip(app: App, next = '/') {
+    const browser = request.agent(app);
+    const start = await browser.get(`/api/auth/google?next=${encodeURIComponent(next)}`);
+    expect(start.status).toBe(302);
+    const google = new URL(start.headers.location);
+    const cb = await browser.get(`/api/auth/google/callback?code=abc&state=${google.searchParams.get('state')}`);
+    expect(cb.status).toBe(302);
+    return { google, back: new URL(cb.headers.location) };
+  }
+
+  async function exchange(app: App, back: URL) {
+    const code = new URLSearchParams(back.hash.slice(1)).get('code');
+    return request(app).post('/api/auth/google/exchange').send({ code });
+  }
+
+  it('redirects to Google, then hands the web app a one-time code for a session', async () => {
     const { app } = makeApp({
-      config: { google },
+      config: { google, apiUrl: 'https://api.example.com', appUrl: 'https://app.example.com' },
       fetch: fakeGoogle({ sub: 'g-123', email: 'carol@gmail.com', email_verified: true, name: 'Carol Smith' }),
     });
-    const agent = request.agent(app);
-    const start = await agent.get('/auth/google?next=/join/abc');
-    expect(start.status).toBe(302);
-    const location = new URL(start.headers.location);
-    expect(location.host).toBe('accounts.google.com');
-    expect(location.searchParams.get('redirect_uri')).toBe('http://localhost:5173/auth/google/callback');
-    const state = location.searchParams.get('state');
+    const { google: to, back } = await googleRoundTrip(app, '/join/abc');
+    expect(to.host).toBe('accounts.google.com');
+    expect(to.searchParams.get('redirect_uri')).toBe('https://api.example.com/api/auth/google/callback');
 
-    const cb = await agent.get(`/auth/google/callback?code=abc&state=${state}`);
-    expect(cb.status).toBe(302);
-    expect(cb.headers.location).toBe('/join/abc');
-    const me = await agent.get('/api/me');
-    expect(me.body.user).toMatchObject({ username: 'CarolSmith', email: 'carol@gmail.com' });
+    expect(back.origin + back.pathname).toBe('https://app.example.com/auth/complete');
+    expect(back.search).toBe('');
+    expect(new URLSearchParams(back.hash.slice(1)).get('next')).toBe('/join/abc');
+
+    const swapped = await exchange(app, back);
+    expect(swapped.status).toBe(200);
+    expect(swapped.body.user).toMatchObject({ username: 'CarolSmith', email: 'carol@gmail.com' });
+    const me = await withToken(app, swapped.body.token).get('/api/me');
+    expect(me.body.user.username).toBe('CarolSmith');
+
+    // The code works once.
+    expect((await exchange(app, back)).status).toBe(401);
   });
 
   it('rejects a callback with the wrong state', async () => {
     const { app } = makeApp({ config: { google }, fetch: fakeGoogle({ sub: 'x' }) });
-    const agent = request.agent(app);
-    await agent.get('/auth/google');
-    const cb = await agent.get('/auth/google/callback?code=abc&state=forged');
-    expect(cb.headers.location).toBe('/?error=google');
-    expect((await agent.get('/api/me')).status).toBe(401);
+    const browser = request.agent(app);
+    await browser.get('/api/auth/google');
+    const cb = await browser.get('/api/auth/google/callback?code=abc&state=forged');
+    expect(cb.headers.location).toBe('http://localhost:5173/?error=google');
   });
 
   it('links Google to an existing account with the same verified email', async () => {
@@ -151,11 +209,8 @@ describe('Google sign-in', () => {
       fetch: fakeGoogle({ sub: 'g-alice', email: 'alice@example.com', email_verified: true, name: 'Alice' }),
     });
     await signup(app, 'alice');
-    const agent = request.agent(app);
-    const start = await agent.get('/auth/google');
-    const state = new URL(start.headers.location).searchParams.get('state');
-    await agent.get(`/auth/google/callback?code=abc&state=${state}`);
-    expect((await agent.get('/api/me')).body.user.username).toBe('alice');
+    const { back } = await googleRoundTrip(app);
+    expect((await exchange(app, back)).body.user.username).toBe('alice');
   });
 });
 
@@ -266,5 +321,30 @@ describe('games', () => {
     expect(resigned.body.game.state.result.winner).toBe('white');
     expect((await alice.get('/api/me')).body.record).toEqual({ wins: 1, losses: 0 });
     expect((await bob.get('/api/me')).body.record).toEqual({ wins: 0, losses: 1 });
+  });
+});
+
+describe('live updates', () => {
+  it('reach a browser connected to another server through Postgres NOTIFY', async () => {
+    // Two hubs share one database, like two API replicas.
+    const publish = async (message: string) => {
+      await db.query('SELECT pg_notify($1, $2)', ['game_events_test', message]);
+    };
+    const hubA = new EventHub(publish);
+    const hubB = new EventHub(publish);
+    await db.listen('game_events_test', { onMessage: hubA.receive });
+    await db.listen('game_events_test', { onMessage: hubB.receive });
+
+    const { app } = makeApp({ hub: hubA });
+    const alice = await signup(app, 'alice');
+    const bob = await signup(app, 'bob');
+    const bobId = (await bob.get('/api/me')).body.user.id;
+
+    const written: string[] = [];
+    hubB.add(bobId, { write: (chunk: string) => written.push(chunk) } as never);
+
+    const { body } = await alice.post('/api/games').send({ opponent: 'bob' });
+    await expect.poll(() => written.join('')).toContain(`"id":"${body.game.id}"`);
+    expect(written[0]).toMatch(/^event: game\n/);
   });
 });
