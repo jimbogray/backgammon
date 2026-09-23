@@ -1,0 +1,77 @@
+name: Deploy to staging
+
+# Every merge to main is tested, built into a container image and deployed to the
+# Azure "staging" environment. Setup steps are in infra/README.md.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time; a newer merge waits for the running deploy instead of cancelling it.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.APP_URL }}
+    permissions:
+      contents: read
+      id-token: write # lets azure/login exchange a GitHub OIDC token for an Azure one
+    env:
+      IMAGE: ${{ vars.AZURE_REGISTRY_NAME }}.azurecr.io/backgammon
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push image
+        run: |
+          az acr login --name "${{ vars.AZURE_REGISTRY_NAME }}"
+          docker build --build-arg APP_VERSION="${{ github.sha }}" -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:staging" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:staging"
+
+      - name: Deploy to App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          images: ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Wait for the new version to serve
+        run: |
+          # App Service keeps serving the old container until the new one passes its
+          # health check, so poll until the app reports this commit.
+          for i in $(seq 1 40); do
+            if curl -fsS "${{ vars.APP_URL }}/healthz" | grep -q '"version":"${{ github.sha }}"'; then
+              echo "Staging is serving ${{ github.sha }}"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::Staging did not start serving ${{ github.sha }} within 10 minutes. Check 'az webapp log tail'."
+          exit 1

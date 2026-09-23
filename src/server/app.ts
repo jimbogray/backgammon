@@ -29,7 +29,7 @@ export function createApp({ db, config, hub = new EventHub(), roll, fetch, clien
   app.use(sessionMiddleware(db));
 
   app.get('/healthz', (_req, res) => {
-    res.json({ ok: true });
+    res.json({ ok: true, version: process.env.APP_VERSION ?? 'dev' });
   });
   app.use(authRouter({ db, config, fetch }));
   app.use(gamesRouter({ db, hub, roll }));

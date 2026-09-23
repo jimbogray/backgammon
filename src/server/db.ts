@@ -50,10 +50,10 @@ const MIGRATIONS: string[] = [
   `,
 ];
 
-export function openDatabase(file: string): DB {
+export function openDatabase(file: string, journalMode: 'wal' | 'delete' = 'wal'): DB {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new Database(file);
-  db.pragma('journal_mode = WAL');
+  db.pragma(`journal_mode = ${journalMode}`);
   db.pragma('foreign_keys = ON');
   migrate(db);
   return db;

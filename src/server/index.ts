@@ -11,7 +11,7 @@ try {
 }
 
 const config = loadConfig();
-const db = openDatabase(config.databasePath);
+const db = openDatabase(config.databasePath, config.databaseJournalMode);
 const app = createApp({ db, config, clientDir: path.resolve('dist', 'client') });
 
 // Clear out expired login sessions now and once a day.

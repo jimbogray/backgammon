@@ -10,6 +10,7 @@ const baseConfig: Config = {
   port: 0,
   appUrl: 'http://localhost:5173',
   databasePath: ':memory:',
+  databaseJournalMode: 'wal',
   isProduction: false,
   google: null,
 };
@@ -38,6 +39,15 @@ async function signup(app: ReturnType<typeof makeApp>['app'], username: string) 
   expect(res.status).toBe(201);
   return agent;
 }
+
+describe('health check', () => {
+  it('reports the running build', async () => {
+    const { app } = makeApp();
+    const res = await request(app).get('/healthz');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, version: process.env.APP_VERSION ?? 'dev' });
+  });
+});
 
 describe('accounts', () => {
   let app: ReturnType<typeof makeApp>['app'];
