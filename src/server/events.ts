@@ -1,12 +1,24 @@
 import type { Response } from 'express';
 
+export interface EventMessage {
+  userIds: number[];
+  event: string;
+  data: unknown;
+}
+
 /**
- * In-process fan-out of "something changed" notices to connected browsers via
+ * Fan-out of "something changed" notices to connected browsers via
  * Server-Sent Events. Each user can have several tabs open. Clients refetch
  * the data they need when a notice arrives, so the payload stays tiny.
+ *
+ * With a `publish` function (Postgres NOTIFY in production) notices go to
+ * every API server, each of which calls `receive` and writes to the browsers
+ * connected to it. Without one, notices stay in this process.
  */
 export class EventHub {
   private streams = new Map<number, Set<Response>>();
+
+  constructor(private publish?: (message: string) => Promise<void>) {}
 
   add(userId: number, res: Response): () => void {
     let set = this.streams.get(userId);
@@ -21,10 +33,41 @@ export class EventHub {
     };
   }
 
-  notify(userIds: Array<number | null | undefined>, event: string, data: unknown): void {
+  async notify(userIds: Array<number | null | undefined>, event: string, data: unknown): Promise<void> {
+    const message: EventMessage = {
+      userIds: [...new Set(userIds)].filter((id): id is number => id != null),
+      event,
+      data,
+    };
+    if (!this.publish) {
+      this.deliver(message);
+      return;
+    }
+    try {
+      await this.publish(JSON.stringify(message));
+    } catch (err) {
+      // The change itself is saved; browsers catch up on their next refresh.
+      console.error('Publishing a live update failed:', err);
+    }
+  }
+
+  /** Handles a message published by any server. */
+  receive = (payload: string): void => {
+    try {
+      this.deliver(JSON.parse(payload) as EventMessage);
+    } catch (err) {
+      console.error('Ignoring a malformed live update:', err);
+    }
+  };
+
+  /** Tells every connected browser to refetch, after updates may have been missed. */
+  resync = (): void => {
+    for (const set of this.streams.values()) for (const res of set) res.write('event: ready\ndata: {}\n\n');
+  };
+
+  private deliver({ userIds, event, data }: EventMessage): void {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const id of new Set(userIds)) {
-      if (id == null) continue;
+    for (const id of userIds) {
       for (const res of this.streams.get(id) ?? []) res.write(payload);
     }
   }

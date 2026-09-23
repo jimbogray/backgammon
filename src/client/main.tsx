@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { AuthProvider, RequireAuth } from './auth';
 import { GamePage } from './pages/GamePage';
+import { GoogleComplete } from './pages/GoogleComplete';
 import { JoinPage } from './pages/JoinPage';
 import { Lobby } from './pages/Lobby';
 import './styles.css';
@@ -24,6 +25,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="/" element={<RequireAuth><Lobby /></RequireAuth>} />
           <Route path="/game/:id" element={<RequireAuth><GamePage /></RequireAuth>} />
           <Route path="/join/:code" element={<RequireAuth><JoinPage /></RequireAuth>} />
+          <Route path="/auth/complete" element={<GoogleComplete />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </AuthProvider>

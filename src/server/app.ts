@@ -1,48 +1,62 @@
 import cookieParser from 'cookie-parser';
-import express from 'express';
-import fs from 'node:fs';
-import path from 'node:path';
+import express, { NextFunction, Request, Response } from 'express';
 import { authRouter, jsonBody, requireJson, sessionMiddleware } from './auth.js';
 import type { Config } from './config.js';
-import type { DB } from './db.js';
+import type { Database } from './db.js';
 import { EventHub } from './events.js';
 import { gamesRouter } from './games.js';
 import type { Roller } from '../shared/engine.js';
 
 export interface AppOptions {
-  db: DB;
+  db: Database;
   config: Config;
   hub?: EventHub;
   roll?: Roller;
   fetch?: typeof fetch;
-  /** Directory holding the built client (served in production). */
-  clientDir?: string;
 }
 
-export function createApp({ db, config, hub = new EventHub(), roll, fetch, clientDir }: AppOptions) {
+/** Lets the browser app, served from its own origin, call the API. */
+function cors(origins: string[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    res.vary('Origin');
+    const origin = req.get('origin');
+    if (origin && origins.includes(origin)) {
+      res.set('Access-Control-Allow-Origin', origin);
+      if (req.method === 'OPTIONS') {
+        res.set({
+          'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE',
+          'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+          'Access-Control-Max-Age': '86400',
+        });
+        res.status(204).end();
+        return;
+      }
+    }
+    next();
+  };
+}
+
+export function createApp({ db, config, hub = new EventHub(), roll, fetch }: AppOptions) {
   const app = express();
   app.disable('x-powered-by');
   if (config.isProduction) app.set('trust proxy', 1);
+  app.use(cors(config.corsOrigins));
   app.use(cookieParser());
   app.use(requireJson);
   app.use(jsonBody);
-  app.use(sessionMiddleware(db));
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true, version: process.env.APP_VERSION ?? 'dev' });
   });
+  app.use(sessionMiddleware(db));
   app.use(authRouter({ db, config, fetch }));
   app.use(gamesRouter({ db, hub, roll }));
 
-  if (clientDir && fs.existsSync(clientDir)) {
-    app.use(express.static(clientDir, { index: false, maxAge: '1h' }));
-    // Single-page app: every non-API route serves index.html.
-    app.get(/^(?!\/api\/|\/auth\/).*/, (_req, res) => {
-      res.sendFile(path.join(clientDir, 'index.html'));
-    });
-  }
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not found' });
+  });
 
-  app.use((err: { status?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((err: { status?: number }, _req: Request, res: Response, _next: NextFunction) => {
     // Client errors such as malformed JSON arrive with a 4xx status.
     if (err?.status && err.status >= 400 && err.status < 500) {
       res.status(err.status).json({ error: 'Bad request' });

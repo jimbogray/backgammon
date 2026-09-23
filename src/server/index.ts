@@ -1,7 +1,7 @@
-import path from 'node:path';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
-import { openDatabase } from './db.js';
+import { connectPostgres, migrate } from './db.js';
+import { EventHub } from './events.js';
 
 // Load settings from a .env file when one exists (see .env.example).
 try {
@@ -10,16 +10,41 @@ try {
   // No .env file: rely on the real environment.
 }
 
+const EVENTS_CHANNEL = 'game_events';
+
 const config = loadConfig();
-const db = openDatabase(config.databasePath, config.databaseJournalMode);
-const app = createApp({ db, config, clientDir: path.resolve('dist', 'client') });
+const db = await connectPostgres(config.databaseUrl, config.databaseAuth);
+await migrate(db);
+
+// Live updates travel through Postgres so every API replica hears about every move.
+const hub = new EventHub(async (message) => {
+  await db.query('SELECT pg_notify($1, $2)', [EVENTS_CHANNEL, message]);
+});
+await db.listen(EVENTS_CHANNEL, { onMessage: hub.receive, onReconnect: hub.resync });
+
+const app = createApp({ db, config, hub });
 
 // Clear out expired login sessions now and once a day.
-const purgeSessions = () => db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
-purgeSessions();
+const purgeSessions = async () => {
+  try {
+    await db.query('DELETE FROM sessions WHERE expires_at <= now()');
+    await db.query('DELETE FROM login_codes WHERE expires_at <= now()');
+  } catch (err) {
+    console.error('Purging expired sessions failed:', err);
+  }
+};
+void purgeSessions();
 setInterval(purgeSessions, 24 * 60 * 60 * 1000).unref();
 
-app.listen(config.port, () => {
-  console.log(`Backgammon server listening on http://localhost:${config.port}`);
+const server = app.listen(config.port, () => {
+  console.log(`Backgammon API listening on http://localhost:${config.port}`);
+  console.log(`Web app: ${config.appUrl || '(APP_URL not set)'}; allowed origins: ${config.corsOrigins.join(', ') || 'none'}`);
   console.log(`Google sign-in: ${config.google ? 'enabled' : 'disabled (set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)'}`);
+});
+
+// Container Apps sends SIGTERM before replacing a replica.
+process.on('SIGTERM', () => {
+  server.close();
+  server.closeAllConnections();
+  void db.close().finally(() => process.exit(0));
 });

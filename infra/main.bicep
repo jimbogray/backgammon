@@ -1,29 +1,33 @@
 // Azure resources for one environment of the backgammon app (staging by default).
+// The deploy pipeline runs this on every merge to main, after pushing the API
+// image; bootstrap.bicep must have been deployed to the same resource group first.
 //
-// Deploy into an existing resource group; see infra/README.md for the full steps:
-//   az deployment group create -g <resource-group> -f infra/main.bicep -p githubRepo=<owner>/<repo>
+//   Browser ──► Static Web App (React build)
+//      └──────► Container App (Express API) ──► Postgres Flexible Server
 //
-// Creates:
-//   - Azure Container Registry holding the app image
-//   - Linux App Service plan and a Web App running the container, with the SQLite
-//     database on the app's persistent /home storage
-//   - A user-assigned identity that GitHub Actions signs in as (OIDC, no secrets),
-//     trusted only for the given GitHub environment
+// The API signs in to Postgres with its managed identity (Microsoft Entra auth;
+// password sign-in is off), so there is no database password anywhere.
 
-@description('Environment name. Also the GitHub environment the deploy identity trusts.')
+@description('Environment name, matching bootstrap.bicep.')
 param environmentName string = 'staging'
-
-@description('GitHub repository in owner/name form, for example jimbogray/backgammon.')
-param githubRepo string
 
 @description('Azure region. Defaults to the resource group\'s region.')
 param location string = resourceGroup().location
 
-@description('Web app name. Becomes <name>.azurewebsites.net, so it must be globally unique.')
-param appName string = 'backgammon-${environmentName}-${take(uniqueString(resourceGroup().id), 6)}'
+@description('Region for the Static Web App, which is only offered in a few (the site itself is served worldwide).')
+@allowed(['westus2', 'centralus', 'eastus2', 'westeurope', 'eastasia'])
+param staticWebAppLocation string = 'eastus2'
 
-@description('App Service plan SKU. B1 is the smallest tier with Always On.')
-param planSku string = 'B1'
+@description('API container image, for example <registry>.azurecr.io/backgammon-api:<sha>.')
+param apiImage string
+
+@description('Fewest API replicas. 1 keeps it warm; 0 scales to zero when idle (slow first request).')
+@minValue(0)
+param apiMinReplicas int = 1
+
+@description('Most API replicas. Live updates go through Postgres, so any number works.')
+@minValue(1)
+param apiMaxReplicas int = 3
 
 @description('Google OAuth client ID. Leave empty to keep Google sign-in off.')
 param googleClientId string = ''
@@ -32,154 +36,229 @@ param googleClientId string = ''
 @description('Google OAuth client secret. Leave empty to keep Google sign-in off.')
 param googleClientSecret string = ''
 
-var imageRepository = 'backgammon'
-var registryName = 'backgammon${uniqueString(resourceGroup().id)}'
-var appUrl = 'https://${appName}.azurewebsites.net'
+var suffix = uniqueString(resourceGroup().id)
+var names = {
+  registry: 'backgammon${suffix}'
+  apiIdentity: 'id-backgammon-${environmentName}-api'
+  logs: 'log-backgammon-${environmentName}'
+  postgres: 'psql-backgammon-${environmentName}-${take(suffix, 6)}'
+  containerEnv: 'cae-backgammon-${environmentName}'
+  api: 'ca-backgammon-${environmentName}-api'
+  web: 'swa-backgammon-${environmentName}'
+}
+var databaseName = 'backgammon'
 var tags = {
   app: 'backgammon'
   environment: environmentName
 }
+var googleEnabled = !empty(googleClientId) && !empty(googleClientSecret)
 
-// Built-in role definition IDs.
-var roles = {
-  acrPull: '7f951dda-4ed3-4680-a7ca-43fe172d538d'
-  acrPush: '8311e382-0749-4cb8-b61a-304f252e45ec'
-  contributor: 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+// Created by bootstrap.bicep.
+resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+  name: names.registry
 }
 
-resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: registryName
+resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
+  name: names.apiIdentity
+}
+
+resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+  name: names.logs
+  location: location
+  tags: tags
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+    retentionInDays: 30
+  }
+}
+
+resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
+  name: names.postgres
   location: location
   tags: tags
   sku: {
-    name: 'Basic'
+    name: 'Standard_B1ms'
+    tier: 'Burstable'
   }
   properties: {
-    adminUserEnabled: false
-  }
-}
-
-resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: '${appName}-plan'
-  location: location
-  tags: tags
-  kind: 'linux'
-  sku: {
-    name: planSku
-  }
-  properties: {
-    reserved: true
-  }
-}
-
-resource site 'Microsoft.Web/sites@2023-12-01' = {
-  name: appName
-  location: location
-  tags: tags
-  kind: 'app,linux,container'
-  identity: {
-    type: 'SystemAssigned'
-  }
-  properties: {
-    serverFarmId: plan.id
-    httpsOnly: true
-    siteConfig: {
-      // The pipeline deploys each commit by its SHA tag and also moves this tag, so
-      // re-running this template keeps the latest deployed image. Until the first
-      // pipeline run the image doesn't exist and the site shows an error page.
-      linuxFxVersion: 'DOCKER|${registry.properties.loginServer}/${imageRepository}:${environmentName}'
-      acrUseManagedIdentityCreds: true
-      alwaysOn: true
-      // Live updates are held in memory and SQLite is a single file: one instance only.
-      numberOfWorkers: 1
-      healthCheckPath: '/healthz'
-      http20Enabled: true
-      minTlsVersion: '1.2'
-      ftpsState: 'Disabled'
-      appSettings: [
-        { name: 'WEBSITES_PORT', value: '3000' }
-        // Mounts the persistent /home share into the container.
-        { name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE', value: 'true' }
-        { name: 'DATABASE_PATH', value: '/home/data/backgammon.db' }
-        // /home is a network share, where SQLite's WAL mode is unreliable.
-        { name: 'DATABASE_JOURNAL_MODE', value: 'delete' }
-        { name: 'APP_URL', value: appUrl }
-        { name: 'GOOGLE_CLIENT_ID', value: googleClientId }
-        { name: 'GOOGLE_CLIENT_SECRET', value: googleClientSecret }
-      ]
+    version: '17'
+    authConfig: {
+      activeDirectoryAuth: 'Enabled'
+      passwordAuth: 'Disabled'
+      tenantId: subscription().tenantId
+    }
+    storage: {
+      storageSizeGB: 32
+      autoGrow: 'Enabled'
+    }
+    backup: {
+      backupRetentionDays: 7
+      geoRedundantBackup: 'Disabled'
+    }
+    highAvailability: {
+      mode: 'Disabled'
+    }
+    network: {
+      publicNetworkAccess: 'Enabled'
     }
   }
 }
 
-// Keep container stdout/stderr so `az webapp log tail` works.
-resource siteLogs 'Microsoft.Web/sites/config@2023-12-01' = {
-  parent: site
-  name: 'logs'
+// Consumption-plan Container Apps have no fixed outbound IPs, so allow Azure
+// services in. Sign-in still needs a Microsoft Entra token for an allowed identity.
+resource postgresAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
+  parent: postgres
+  name: 'AllowAllAzureServicesAndResourcesWithinAzureIps'
   properties: {
-    httpLogs: {
-      fileSystem: {
-        enabled: true
-        retentionInDays: 7
-        retentionInMb: 35
+    startIpAddress: '0.0.0.0'
+    endIpAddress: '0.0.0.0'
+  }
+}
+
+// The API's identity administers the server, so it can create the database and
+// its tables on first start. The server allows one change at a time, hence dependsOn.
+module postgresApiAdmin 'modules/postgres-admin.bicep' = {
+  name: 'postgres-api-admin'
+  params: {
+    serverName: postgres.name
+    principalId: apiIdentity.properties.principalId
+    principalName: apiIdentity.name
+  }
+  dependsOn: [
+    postgresAllowAzure
+  ]
+}
+
+resource web 'Microsoft.Web/staticSites@2023-12-01' = {
+  name: names.web
+  location: staticWebAppLocation
+  tags: tags
+  sku: {
+    name: 'Free'
+    tier: 'Free'
+  }
+  properties: {}
+}
+
+resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: names.containerEnv
+  location: location
+  tags: tags
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logs.properties.customerId
+        sharedKey: logs.listKeys().primarySharedKey
       }
     }
   }
 }
 
-resource sitePullsFromRegistry 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(registry.id, site.id, roles.acrPull)
-  scope: registry
-  properties: {
-    principalId: site.identity.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull)
-  }
-}
+var appUrl = 'https://${web.properties.defaultHostname}'
+var apiUrl = 'https://${names.api}.${containerEnv.properties.defaultDomain}'
 
-// Identity used by the GitHub Actions deploy job.
-resource deployIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: '${appName}-github-deploy'
+var baseEnv = [
+  { name: 'APP_URL', value: appUrl }
+  { name: 'API_URL', value: apiUrl }
+  {
+    name: 'DATABASE_URL'
+    value: 'postgresql://${apiIdentity.name}@${postgres.properties.fullyQualifiedDomainName}:5432/${databaseName}?sslmode=verify-full'
+  }
+  { name: 'DATABASE_AUTH', value: 'entra' }
+  // Which managed identity DefaultAzureCredential should use.
+  { name: 'AZURE_CLIENT_ID', value: apiIdentity.properties.clientId }
+]
+var googleEnv = googleEnabled
+  ? [
+      { name: 'GOOGLE_CLIENT_ID', value: googleClientId }
+      { name: 'GOOGLE_CLIENT_SECRET', secretRef: 'google-client-secret' }
+    ]
+  : []
+
+resource api 'Microsoft.App/containerApps@2024-03-01' = {
+  name: names.api
   location: location
   tags: tags
-}
-
-resource githubFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
-  parent: deployIdentity
-  name: 'github-${environmentName}'
-  properties: {
-    issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubRepo}:environment:${environmentName}'
-    audiences: [
-      'api://AzureADTokenExchange'
-    ]
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${apiIdentity.id}': {}
+    }
   }
-}
-
-resource deployPushesToRegistry 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(registry.id, deployIdentity.id, roles.acrPush)
-  scope: registry
   properties: {
-    principalId: deployIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPush)
+    managedEnvironmentId: containerEnv.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 3000
+        transport: 'auto'
+        allowInsecure: false
+      }
+      registries: [
+        {
+          server: registry.properties.loginServer
+          identity: apiIdentity.id
+        }
+      ]
+      secrets: googleEnabled ? [{ name: 'google-client-secret', value: googleClientSecret }] : []
+    }
+    template: {
+      containers: [
+        {
+          name: 'api'
+          image: apiImage
+          resources: {
+            cpu: json('0.25')
+            memory: '0.5Gi'
+          }
+          env: concat(baseEnv, googleEnv)
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: { path: '/healthz', port: 3000 }
+              periodSeconds: 3
+              failureThreshold: 20
+            }
+            {
+              type: 'Liveness'
+              httpGet: { path: '/healthz', port: 3000 }
+              periodSeconds: 30
+            }
+            {
+              type: 'Readiness'
+              httpGet: { path: '/healthz', port: 3000 }
+              periodSeconds: 10
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: apiMinReplicas
+        maxReplicas: apiMaxReplicas
+        rules: [
+          {
+            // Each open game tab holds one live-update request, so scale on a generous count.
+            name: 'http'
+            http: {
+              metadata: {
+                concurrentRequests: '100'
+              }
+            }
+          }
+        ]
+      }
+    }
   }
+  dependsOn: [
+    postgresApiAdmin
+  ]
 }
 
-// Lets the pipeline update the web app's container image. Scoped to this
-// resource group only.
-resource deployManagesResourceGroup 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, deployIdentity.id, roles.contributor)
-  properties: {
-    principalId: deployIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.contributor)
-  }
-}
-
-// Set these as variables on the GitHub "staging" environment.
-output AZURE_CLIENT_ID string = deployIdentity.properties.clientId
-output AZURE_TENANT_ID string = subscription().tenantId
-output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId
-output AZURE_REGISTRY_NAME string = registry.name
-output AZURE_WEBAPP_NAME string = site.name
 output APP_URL string = appUrl
+output API_URL string = apiUrl
+output STATIC_WEB_APP_NAME string = web.name
+output POSTGRES_HOST string = postgres.properties.fullyQualifiedDomainName

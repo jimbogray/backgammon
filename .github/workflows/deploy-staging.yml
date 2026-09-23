@@ -1,7 +1,9 @@
 name: Deploy to staging
 
-# Every merge to main is tested, built into a container image and deployed to the
-# Azure "staging" environment. Setup steps are in infra/README.md.
+# Every merge to main is tested, then the API image is built and pushed, the
+# Azure resources in infra/main.bicep are brought up to date (Postgres, the
+# Container App running that image, the Static Web App), and the web app is
+# built against the API's address and uploaded. Setup steps: infra/README.md.
 on:
   push:
     branches: [main]
@@ -19,8 +21,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -33,45 +35,85 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: staging
-      url: ${{ vars.APP_URL }}
+      url: ${{ steps.infra.outputs.app_url }}
     permissions:
       contents: read
       id-token: write # lets azure/login exchange a GitHub OIDC token for an Azure one
     env:
-      IMAGE: ${{ vars.AZURE_REGISTRY_NAME }}.azurecr.io/backgammon
+      IMAGE: ${{ vars.AZURE_REGISTRY_NAME }}.azurecr.io/backgammon-api:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
 
       - name: Sign in to Azure
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build and push image
+      - name: Build and push the API image
         run: |
           az acr login --name "${{ vars.AZURE_REGISTRY_NAME }}"
-          docker build --build-arg APP_VERSION="${{ github.sha }}" -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:staging" .
-          docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:staging"
+          docker build --build-arg APP_VERSION="${{ github.sha }}" -t "$IMAGE" .
+          docker push "$IMAGE"
 
-      - name: Deploy to App Service
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
-          images: ${{ env.IMAGE }}:${{ github.sha }}
-
-      - name: Wait for the new version to serve
+      - name: Deploy Azure resources and the new API version
+        id: infra
+        env:
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: |
-          # App Service keeps serving the old container until the new one passes its
-          # health check, so poll until the app reports this commit.
+          outputs=$(az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --name "staging-${{ github.run_number }}" \
+            --template-file infra/main.bicep \
+            --parameters apiImage="$IMAGE" \
+                         googleClientId="$GOOGLE_CLIENT_ID" \
+                         googleClientSecret="$GOOGLE_CLIENT_SECRET" \
+            --query properties.outputs --output json)
+          # The Azure CLI can change the case of output names, so match them case-insensitively.
+          output() { jq -r --arg k "$1" 'to_entries[] | select((.key | ascii_upcase) == $k) | .value.value' <<<"$outputs"; }
+          echo "app_url=$(output APP_URL)" >> "$GITHUB_OUTPUT"
+          echo "api_url=$(output API_URL)" >> "$GITHUB_OUTPUT"
+          echo "web_name=$(output STATIC_WEB_APP_NAME)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the new API version to serve
+        run: |
+          # The API reports its commit on /healthz; wait until the new revision is live.
           for i in $(seq 1 40); do
-            if curl -fsS "${{ vars.APP_URL }}/healthz" | grep -q '"version":"${{ github.sha }}"'; then
-              echo "Staging is serving ${{ github.sha }}"
+            if curl -fsS "${{ steps.infra.outputs.api_url }}/healthz" | grep -q '"version":"${{ github.sha }}"'; then
+              echo "API is serving ${{ github.sha }}"
               exit 0
             fi
             sleep 15
           done
-          echo "::error::Staging did not start serving ${{ github.sha }} within 10 minutes. Check 'az webapp log tail'."
+          echo "::error::The API did not start serving ${{ github.sha }} within 10 minutes. Check its logs (infra/README.md)."
           exit 1
+
+      - name: Build the web app
+        run: |
+          npm ci
+          npm run build:web
+        env:
+          VITE_API_URL: ${{ steps.infra.outputs.api_url }}
+
+      - name: Get the Static Web App deploy token
+        id: swa
+        run: |
+          token=$(az staticwebapp secrets list --name "${{ steps.infra.outputs.web_name }}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" --query properties.apiKey --output tsv)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the web app
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
+          action: upload
+          app_location: dist/client
+          skip_app_build: true
+          skip_api_build: true

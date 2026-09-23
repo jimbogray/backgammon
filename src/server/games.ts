@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { Action, applyAction, Color, GameError, GameState, newGame, Roller } from '../shared/engine.js';
 import type { GameSummary, GameView, PlayerInfo } from '../shared/api.js';
 import { requireUser, User } from './auth.js';
-import type { DB } from './db.js';
+import type { Database, Queryable } from './db.js';
 import type { EventHub } from './events.js';
 
 interface GameRow {
@@ -13,12 +13,12 @@ interface GameRow {
   black_id: number | null;
   status: 'waiting' | 'active' | 'finished';
   invite_code: string | null;
-  state: string | null;
+  state: GameState | null;
   version: number;
   winner_id: number | null;
   points: number | null;
-  created_at: string;
-  updated_at: string;
+  created_at: Date;
+  updated_at: Date;
 }
 
 const ACTION_TYPES = new Set(['roll', 'move', 'double', 'take', 'drop', 'resign']);
@@ -43,7 +43,7 @@ export function awaiting(state: GameState): Color | null {
 }
 
 export interface GameDeps {
-  db: DB;
+  db: Database;
   hub: EventHub;
   roll?: Roller;
 }
@@ -51,25 +51,39 @@ export interface GameDeps {
 export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
   const router = Router();
 
-  const getRow = db.prepare('SELECT * FROM games WHERE id = ?');
-  const getUser = db.prepare('SELECT id, username FROM users WHERE id = ?');
-
-  function player(id: number | null): PlayerInfo | null {
-    return id == null ? null : ((getUser.get(id) as PlayerInfo | undefined) ?? null);
+  async function getRow(q: Queryable, id: string, lock = false): Promise<GameRow | undefined> {
+    const { rows } = await q.query<GameRow>(`SELECT * FROM games WHERE id = $1${lock ? ' FOR UPDATE' : ''}`, [id]);
+    return rows[0];
   }
 
-  function view(row: GameRow, userId: number): GameView {
+  /** Looks up usernames for a batch of user ids. */
+  async function players(ids: Array<number | null>): Promise<Map<number, PlayerInfo>> {
+    const wanted = [...new Set(ids.filter((id): id is number => id != null))];
+    if (wanted.length === 0) return new Map();
+    const { rows } = await db.query<PlayerInfo>('SELECT id, username FROM users WHERE id = ANY($1::int[])', [wanted]);
+    return new Map(rows.map((p) => [p.id, p]));
+  }
+
+  async function player(id: number | null): Promise<PlayerInfo | null> {
+    return id == null ? null : ((await players([id])).get(id) ?? null);
+  }
+
+  async function view(row: GameRow, userId: number): Promise<GameView> {
     const you = colorOf(row, userId);
+    const names = await players([row.white_id, row.black_id]);
     return {
       id: row.id,
       status: row.status,
       version: row.version,
       you,
-      players: { white: player(row.white_id), black: player(row.black_id) },
+      players: {
+        white: row.white_id == null ? null : (names.get(row.white_id) ?? null),
+        black: row.black_id == null ? null : (names.get(row.black_id) ?? null),
+      },
       createdBy: row.created_by,
       inviteCode: row.status === 'waiting' && row.created_by === userId ? row.invite_code : null,
-      state: row.state ? (JSON.parse(row.state) as GameState) : null,
-      updatedAt: row.updated_at,
+      state: row.state,
+      updatedAt: row.updated_at.toISOString(),
     };
   }
 
@@ -81,8 +95,8 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
     return [row.white_id, row.black_id, row.created_by].filter((id): id is number => id != null);
   }
 
-  function announce(row: GameRow): void {
-    hub.notify(participants(row), 'game', { id: row.id, version: row.version });
+  function announce(row: GameRow): Promise<void> {
+    return hub.notify(participants(row), 'game', { id: row.id, version: row.version });
   }
 
   router.use('/api', requireUser);
@@ -105,54 +119,56 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
     });
   });
 
-  router.get('/api/games', (req, res) => {
+  router.get('/api/games', async (req, res) => {
     const userId = req.user!.id;
-    const rows = db
-      .prepare(
-        `SELECT * FROM games WHERE white_id = @id OR black_id = @id OR (status = 'waiting' AND created_by = @id)
-         ORDER BY updated_at DESC, created_at DESC LIMIT 200`,
-      )
-      .all({ id: userId }) as GameRow[];
+    const { rows } = await db.query<GameRow>(
+      `SELECT * FROM games WHERE white_id = $1 OR black_id = $1 OR (status = 'waiting' AND created_by = $1)
+       ORDER BY updated_at DESC, created_at DESC LIMIT 200`,
+      [userId],
+    );
+    const opponentOf = (row: GameRow) => (colorOf(row, userId) === 'white' ? row.black_id : row.white_id);
+    const names = await players(rows.map(opponentOf));
     const games: GameSummary[] = rows.map((row) => {
       const you = colorOf(row, userId);
-      const state = row.state ? (JSON.parse(row.state) as GameState) : null;
-      const opponentId = you === 'white' ? row.black_id : row.white_id;
+      const state = row.state;
+      const opponentId = opponentOf(row);
       return {
         id: row.id,
         status: row.status,
         you,
-        opponent: player(opponentId),
+        opponent: opponentId == null ? null : (names.get(opponentId) ?? null),
         yourTurn: Boolean(state && you && awaiting(state) === you),
         inviteCode: row.status === 'waiting' ? row.invite_code : null,
         result:
           state?.result && you
             ? { won: state.result.winner === you, points: state.result.points, reason: state.result.reason }
             : null,
-        updatedAt: row.updated_at,
+        updatedAt: row.updated_at.toISOString(),
       };
     });
     res.json({ games });
   });
 
   // Start a game against a registered player, or create an invite link.
-  router.post('/api/games', (req, res) => {
+  router.post('/api/games', async (req, res) => {
     const me = req.user!;
     const opponentName = typeof req.body?.opponent === 'string' ? req.body.opponent.trim() : '';
     const id = newId();
 
     if (!opponentName) {
       const inviteCode = newId(12);
-      db.prepare(
-        `INSERT INTO games (id, created_by, white_id, status, invite_code) VALUES (?, ?, ?, 'waiting', ?)`,
-      ).run(id, me.id, me.id, inviteCode);
-      const row = getRow.get(id) as GameRow;
-      res.status(201).json({ game: view(row, me.id) });
+      const { rows } = await db.query<GameRow>(
+        `INSERT INTO games (id, created_by, white_id, status, invite_code) VALUES ($1, $2, $2, 'waiting', $3) RETURNING *`,
+        [id, me.id, inviteCode],
+      );
+      res.status(201).json({ game: await view(rows[0], me.id) });
       return;
     }
 
-    const opponent = db.prepare('SELECT id, username FROM users WHERE username = ?').get(opponentName) as
-      | User
-      | undefined;
+    const found = await db.query<User>('SELECT id, username FROM users WHERE lower(username) = lower($1)', [
+      opponentName,
+    ]);
+    const opponent = found.rows[0];
     if (!opponent) {
       res.status(404).json({ error: `No player named "${opponentName}". Send them an invite link instead.` });
       return;
@@ -162,88 +178,91 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       return;
     }
     const state = newGame(roll);
-    db.prepare(
-      `INSERT INTO games (id, created_by, white_id, black_id, status, state, version) VALUES (?, ?, ?, ?, 'active', ?, 1)`,
-    ).run(id, me.id, me.id, opponent.id, JSON.stringify(state));
-    const row = getRow.get(id) as GameRow;
-    announce(row);
-    res.status(201).json({ game: view(row, me.id) });
+    const { rows } = await db.query<GameRow>(
+      `INSERT INTO games (id, created_by, white_id, black_id, status, state, version)
+       VALUES ($1, $2, $2, $3, 'active', $4, 1) RETURNING *`,
+      [id, me.id, opponent.id, JSON.stringify(state)],
+    );
+    await announce(rows[0]);
+    res.status(201).json({ game: await view(rows[0], me.id) });
   });
 
-  router.get('/api/invites/:code', (req, res) => {
-    const row = db.prepare('SELECT * FROM games WHERE invite_code = ?').get(req.params.code) as GameRow | undefined;
+  router.get('/api/invites/:code', async (req, res) => {
+    const { rows } = await db.query<GameRow>('SELECT * FROM games WHERE invite_code = $1', [req.params.code]);
+    const row = rows[0];
     if (!row) {
       res.status(404).json({ error: 'This invite link is not valid' });
       return;
     }
     res.json({
       gameId: row.id,
-      from: player(row.created_by),
+      from: await player(row.created_by),
       status: row.status,
       joined: canSee(row, req.user!.id),
     });
   });
 
-  router.post('/api/invites/:code/join', (req, res) => {
+  router.post('/api/invites/:code/join', async (req, res) => {
     const me = req.user!;
-    const result = db.transaction(() => {
-      const row = db.prepare('SELECT * FROM games WHERE invite_code = ?').get(req.params.code) as GameRow | undefined;
+    const result = await db.transaction(async (tx) => {
+      const found = await tx.query<GameRow>('SELECT * FROM games WHERE invite_code = $1 FOR UPDATE', [req.params.code]);
+      const row = found.rows[0];
       if (!row) return { status: 404, error: 'This invite link is not valid' } as const;
       if (canSee(row, me.id) && row.status !== 'waiting') return { row } as const;
       if (row.created_by === me.id) return { status: 400, error: 'Share this link with your opponent' } as const;
       if (row.status !== 'waiting') return { status: 409, error: 'Someone else already joined this game' } as const;
       const state = newGame(roll);
-      db.prepare(
-        `UPDATE games SET black_id = ?, status = 'active', state = ?, version = version + 1, updated_at = datetime('now')
-         WHERE id = ? AND status = 'waiting'`,
-      ).run(me.id, JSON.stringify(state), row.id);
-      return { row: getRow.get(row.id) as GameRow } as const;
-    })();
+      const updated = await tx.query<GameRow>(
+        `UPDATE games SET black_id = $1, status = 'active', state = $2, version = version + 1, updated_at = now()
+         WHERE id = $3 RETURNING *`,
+        [me.id, JSON.stringify(state), row.id],
+      );
+      return { row: updated.rows[0] } as const;
+    });
     if ('error' in result) {
       res.status(result.status!).json({ error: result.error });
       return;
     }
-    announce(result.row);
-    res.json({ game: view(result.row, me.id) });
+    await announce(result.row);
+    res.json({ game: await view(result.row, me.id) });
   });
 
-  router.get('/api/games/:id', (req, res) => {
-    const row = getRow.get(req.params.id) as GameRow | undefined;
+  router.get('/api/games/:id', async (req, res) => {
+    const row = await getRow(db, req.params.id);
     if (!row || !canSee(row, req.user!.id)) {
       res.status(404).json({ error: 'Game not found' });
       return;
     }
-    res.json({ game: view(row, req.user!.id) });
+    res.json({ game: await view(row, req.user!.id) });
   });
 
-  router.get('/api/games/:id/history', (req, res) => {
-    const row = getRow.get(req.params.id) as GameRow | undefined;
+  router.get('/api/games/:id/history', async (req, res) => {
+    const row = await getRow(db, req.params.id);
     if (!row || !canSee(row, req.user!.id)) {
       res.status(404).json({ error: 'Game not found' });
       return;
     }
-    const actions = db
-      .prepare(
-        `SELECT a.action, a.created_at AS at, u.username FROM game_actions a JOIN users u ON u.id = a.user_id
-         WHERE a.game_id = ? ORDER BY a.id`,
-      )
-      .all(row.id) as Array<{ action: string; at: string; username: string }>;
-    res.json({ actions: actions.map((a) => ({ ...a, action: JSON.parse(a.action) })) });
+    const { rows: actions } = await db.query<{ action: unknown; at: Date; username: string }>(
+      `SELECT a.action, a.created_at AS at, u.username FROM game_actions a JOIN users u ON u.id = a.user_id
+       WHERE a.game_id = $1 ORDER BY a.id`,
+      [row.id],
+    );
+    res.json({ actions: actions.map((a) => ({ ...a, at: a.at.toISOString() })) });
   });
 
-  router.delete('/api/games/:id', (req, res) => {
-    const row = getRow.get(req.params.id) as GameRow | undefined;
+  router.delete('/api/games/:id', async (req, res) => {
+    const row = await getRow(db, req.params.id);
     if (!row || row.created_by !== req.user!.id || row.status !== 'waiting') {
       res.status(404).json({ error: 'Only an unanswered invite can be cancelled' });
       return;
     }
-    db.prepare(`DELETE FROM games WHERE id = ? AND status = 'waiting'`).run(row.id);
+    await db.query(`DELETE FROM games WHERE id = $1 AND status = 'waiting'`, [row.id]);
     res.json({ ok: true });
   });
 
   // Every game action goes through here. The client sends the version it last
   // saw so that two tabs (or two players) can't act on a stale position.
-  router.post('/api/games/:id/actions', (req, res) => {
+  router.post('/api/games/:id/actions', async (req, res) => {
     const me = req.user!;
     const action = req.body?.action as Action | undefined;
     const expectedVersion = Number(req.body?.version);
@@ -252,8 +271,9 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       return;
     }
 
-    const outcome = db.transaction(() => {
-      const row = getRow.get(req.params.id) as GameRow | undefined;
+    const outcome = await db.transaction(async (tx) => {
+      // Row lock: two requests for the same game take turns.
+      const row = await getRow(tx, req.params.id, true);
       if (!row || !canSee(row, me.id)) return { status: 404, error: 'Game not found' } as const;
       const color = colorOf(row, me.id);
       if (row.status !== 'active' || !row.state || !color) {
@@ -264,35 +284,36 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       }
       let next: GameState;
       try {
-        next = applyAction(JSON.parse(row.state) as GameState, color, action, roll);
+        next = applyAction(row.state, color, action, roll);
       } catch (err) {
         if (err instanceof GameError) return { status: 400, error: err.message, row } as const;
         throw err;
       }
       const finished = next.phase === 'finished';
       const winnerId = finished && next.result ? (next.result.winner === 'white' ? row.white_id : row.black_id) : null;
-      db.prepare(
-        `UPDATE games SET state = ?, version = version + 1, status = ?, winner_id = ?, points = ?, updated_at = datetime('now')
-         WHERE id = ? AND version = ?`,
-      ).run(JSON.stringify(next), finished ? 'finished' : 'active', winnerId, next.result?.points ?? null, row.id, row.version);
+      const updated = await tx.query<GameRow>(
+        `UPDATE games SET state = $1, version = version + 1, status = $2, winner_id = $3, points = $4, updated_at = now()
+         WHERE id = $5 RETURNING *`,
+        [JSON.stringify(next), finished ? 'finished' : 'active', winnerId, next.result?.points ?? null, row.id],
+      );
       const logged = action.type === 'move' ? { type: 'move', moves: next.lastTurn?.moves ?? [] } : { type: action.type };
       const withDice = action.type === 'roll' ? { ...logged, dice: next.dice ?? next.lastTurn?.dice } : logged;
-      db.prepare('INSERT INTO game_actions (game_id, user_id, action) VALUES (?, ?, ?)').run(
+      await tx.query('INSERT INTO game_actions (game_id, user_id, action) VALUES ($1, $2, $3)', [
         row.id,
         me.id,
         JSON.stringify(withDice),
-      );
-      return { row: getRow.get(row.id) as GameRow } as const;
-    })();
+      ]);
+      return { row: updated.rows[0] } as const;
+    });
 
     if ('error' in outcome) {
       const body: Record<string, unknown> = { error: outcome.error };
-      if ('row' in outcome && outcome.row) body.game = view(outcome.row, me.id);
+      if ('row' in outcome && outcome.row) body.game = await view(outcome.row, me.id);
       res.status(outcome.status!).json(body);
       return;
     }
-    announce(outcome.row);
-    res.json({ game: view(outcome.row, me.id) });
+    await announce(outcome.row);
+    res.json({ game: await view(outcome.row, me.id) });
   });
 
   return router;
