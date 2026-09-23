@@ -66,7 +66,11 @@ jobs:
         env:
           GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          # Optional: region for the app's resources when it differs from the resource group's.
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
         run: |
+          location_param=()
+          if [ -n "$AZURE_LOCATION" ]; then location_param=(location="$AZURE_LOCATION"); fi
           outputs=$(az deployment group create \
             --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
             --name "staging-${{ github.run_number }}" \
@@ -74,6 +78,7 @@ jobs:
             --parameters apiImage="$IMAGE" \
                          googleClientId="$GOOGLE_CLIENT_ID" \
                          googleClientSecret="$GOOGLE_CLIENT_SECRET" \
+                         "${location_param[@]}" \
             --query properties.outputs --output json)
           # The Azure CLI can change the case of output names, so match them case-insensitively.
           output() { jq -r --arg k "$1" 'to_entries[] | select((.key | ascii_upcase) == $k) | .value.value' <<<"$outputs"; }

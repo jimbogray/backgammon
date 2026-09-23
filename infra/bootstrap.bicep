@@ -15,6 +15,9 @@ param environmentName string = 'staging'
 @description('GitHub repository in owner/name form, for example jimbogray/backgammon.')
 param githubRepo string
 
+@description('Start of the GitHub OIDC token subject, before ":environment:". Repositories using immutable subjects need the ID form, repo:owner@ownerId/name@repoId; `gh api repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix` prints it. Defaults to repo:<githubRepo>.')
+param githubSubjectPrefix string = 'repo:${githubRepo}'
+
 @description('Azure region. Defaults to the resource group\'s region.')
 param location string = resourceGroup().location
 
@@ -58,7 +61,7 @@ resource githubFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/fede
   name: 'github-${environmentName}'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubRepo}:environment:${environmentName}'
+    subject: '${githubSubjectPrefix}:environment:${environmentName}'
     audiences: [
       'api://AzureADTokenExchange'
     ]
