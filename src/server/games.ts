@@ -103,6 +103,11 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
 
   // Server-Sent Events: tells the browser when any of this user's games change.
   router.get('/api/events', (req, res) => {
+    const remove = hub.add(req.user!.id, res);
+    if (!remove) {
+      res.status(503).json({ error: 'Live updates are busy. Please try again shortly.' });
+      return;
+    }
     res.set({
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -111,7 +116,6 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
     });
     res.flushHeaders();
     res.write('event: ready\ndata: {}\n\n');
-    const remove = hub.add(req.user!.id, res);
     const heartbeat = setInterval(() => res.write(': ping\n\n'), 25_000);
     req.on('close', () => {
       clearInterval(heartbeat);

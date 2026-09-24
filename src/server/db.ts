@@ -27,13 +27,20 @@ pg.types.setTypeParser(pg.types.builtins.INT8, (value) => Number(value));
 
 const ENTRA_SCOPE = 'https://ossrdbms-aad.database.windows.net/.default';
 
-function poolConfig(url: string, auth: DatabaseAuth): pg.PoolConfig {
+/** Connect as someone other than the connection string's user: another managed identity. */
+export interface ConnectAs {
+  user: string;
+  /** Client ID of the managed identity whose token signs `user` in. */
+  clientId: string;
+}
+
+function poolConfig(url: string, auth: DatabaseAuth, as?: ConnectAs): pg.PoolConfig {
   const parsed = parseConnectionString(url);
   const config: pg.PoolConfig = {
     host: parsed.host ?? undefined,
     port: parsed.port ? Number(parsed.port) : undefined,
     database: parsed.database ?? undefined,
-    user: parsed.user,
+    user: as?.user ?? parsed.user,
     password: parsed.password || undefined,
     ssl: parsed.ssl as pg.PoolConfig['ssl'],
     max: 10,
@@ -42,15 +49,15 @@ function poolConfig(url: string, auth: DatabaseAuth): pg.PoolConfig {
     // Azure Database for PostgreSQL with Microsoft Entra auth: the password is a
     // short-lived access token for the app's managed identity (or your `az login`
     // locally). pg asks for it on every new connection; the credential caches it.
-    const credential = new DefaultAzureCredential({ managedIdentityClientId: process.env.AZURE_CLIENT_ID });
+    const credential = new DefaultAzureCredential({ managedIdentityClientId: as?.clientId ?? process.env.AZURE_CLIENT_ID });
     config.password = async () => (await credential.getToken(ENTRA_SCOPE)).token;
   }
   return config;
 }
 
 /** Connects to Postgres, creating the database first if it doesn't exist yet. */
-export async function connectPostgres(url: string, auth: DatabaseAuth = 'password'): Promise<Database> {
-  const config = poolConfig(url, auth);
+export async function connectPostgres(url: string, auth: DatabaseAuth = 'password', as?: ConnectAs): Promise<Database> {
+  const config = poolConfig(url, auth, as);
   let pool = new pg.Pool(config);
   try {
     await pool.query('SELECT 1');
@@ -205,5 +212,43 @@ export async function migrate(db: Database): Promise<void> {
       await tx.query(MIGRATIONS[v]);
       await tx.query('INSERT INTO schema_migrations (version) VALUES ($1)', [v + 1]);
     }
+  });
+}
+
+/**
+ * Creates the Postgres role for a managed identity (Azure Database for
+ * PostgreSQL with Microsoft Entra auth) unless it exists. Must be run by a
+ * Microsoft Entra administrator. The role gets no rights here; see grantAppAccess.
+ */
+export async function ensureEntraRole(url: string, name: string, objectId: string): Promise<void> {
+  // Microsoft's pgaadauth functions live in the server's `postgres` database.
+  const client = new pg.Client({ ...poolConfig(url, 'entra'), database: 'postgres' });
+  await client.connect();
+  try {
+    // Replicas starting together take turns.
+    await client.query('SELECT pg_advisory_lock(7461002)');
+    const { rows } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [name]);
+    if (rows.length === 0) {
+      await client.query(`SELECT * FROM pgaadauth_create_principal_with_oid($1, $2, 'service', false, false)`, [name, objectId]);
+      console.log(`Created database role ${name}`);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Lets `role` read and write the app's rows and nothing more: it can't change
+ * the schema, drop tables, or touch other databases. The API serves requests
+ * as this role, so a bug in a query can't do more damage than that.
+ */
+export async function grantAppAccess(db: Database, role: string): Promise<void> {
+  const r = pg.escapeIdentifier(role);
+  await db.transaction(async (tx) => {
+    await tx.query('SELECT pg_advisory_xact_lock(7461001)');
+    await tx.query(`GRANT USAGE ON SCHEMA public TO ${r}`);
+    await tx.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${r}`);
+    await tx.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${r}`);
+    await tx.query(`REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM ${r}`);
   });
 }

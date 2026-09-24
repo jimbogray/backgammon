@@ -40,6 +40,8 @@ async function run(signal: AbortSignal) {
           const event = /^event: (.*)$/m.exec(block)?.[1];
           const data = /^data: (.*)$/m.exec(block)?.[1];
           if (event === 'game' && data) emit(JSON.parse(data));
+          // The user opened more tabs than the API streams to; newer tabs take over.
+          if (event === 'replaced') failures = 5;
           // After a (re)connect, refetch in case something changed while offline.
           if (event === 'ready') {
             failures = 0;

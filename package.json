@@ -24,6 +24,7 @@
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
     "pg": "^8.23.0",
     "pg-connection-string": "^2.14.0",
     "react": "^19.3.0",

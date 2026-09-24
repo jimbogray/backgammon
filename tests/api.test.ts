@@ -2,7 +2,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/server/app';
 import type { Config } from '../src/server/config';
-import { EventHub } from '../src/server/events';
+import { EventHub, MAX_STREAMS_PER_USER } from '../src/server/events';
 import type { GameView } from '../src/shared/api';
 import { availableMoves, Roller } from '../src/shared/engine';
 import { createTestDatabase } from './testDb';
@@ -14,6 +14,7 @@ const baseConfig: Config = {
   corsOrigins: ['http://localhost:5173'],
   databaseUrl: 'unused',
   databaseAuth: 'password',
+  databaseAppRole: null,
   isProduction: false,
   google: null,
 };
@@ -134,6 +135,27 @@ describe('accounts', () => {
     expect(res.status).toBe(400);
   });
 
+  it('stops password guessing on one account', async () => {
+    await signup(app, 'alice');
+    const guess = () => request(app).post('/api/auth/login').send({ login: 'alice', password: 'wrong guess' });
+    for (let i = 0; i < 10; i++) expect((await guess()).status).toBe(401);
+    const blocked = await guess();
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error).toMatch(/Too many sign-in attempts/);
+    // Other accounts can still sign in.
+    await signup(app, 'bob');
+    const bob = await request(app).post('/api/auth/login').send({ login: 'bob', password: 'correct horse' });
+    expect(bob.status).toBe(200);
+  });
+
+  it('limits sign-ups from one address', async () => {
+    for (let i = 0; i < 5; i++) await signup(app, `player${i}`);
+    const res = await request(app)
+      .post('/api/auth/signup')
+      .send({ username: 'player5', email: 'player5@example.com', password: 'correct horse' });
+    expect(res.status).toBe(429);
+  });
+
   it('reports Google as disabled without credentials', async () => {
     expect((await request(app).get('/api/auth/providers')).body).toEqual({ google: false });
     expect((await request(app).get('/api/auth/google')).status).toBe(404);
@@ -203,14 +225,27 @@ describe('Google sign-in', () => {
     expect(cb.headers.location).toBe('http://localhost:5173/?error=google');
   });
 
-  it('links Google to an existing account with the same verified email', async () => {
+  it('never signs a Google user in to a password account that registered the same email', async () => {
+    // Sign-up doesn't verify emails, so whoever registered alice@example.com may not own it.
     const { app } = makeApp({
       config: { google },
       fetch: fakeGoogle({ sub: 'g-alice', email: 'alice@example.com', email_verified: true, name: 'Alice' }),
     });
     await signup(app, 'alice');
     const { back } = await googleRoundTrip(app);
-    expect((await exchange(app, back)).body.user.username).toBe('alice');
+    expect(back.toString()).toBe('http://localhost:5173/?error=google-email');
+    const { rows } = await db.query('SELECT google_sub FROM users WHERE username = $1', ['alice']);
+    expect(rows).toEqual([{ google_sub: null }]);
+  });
+
+  it('signs a returning Google user in to the same account', async () => {
+    const { app } = makeApp({
+      config: { google },
+      fetch: fakeGoogle({ sub: 'g-dave', email: 'dave@gmail.com', email_verified: true, name: 'Dave' }),
+    });
+    const first = await exchange(app, (await googleRoundTrip(app)).back);
+    const second = await exchange(app, (await googleRoundTrip(app)).back);
+    expect(second.body.user.id).toBe(first.body.user.id);
   });
 });
 
@@ -325,6 +360,23 @@ describe('games', () => {
 });
 
 describe('live updates', () => {
+  it('keeps a few streams per user, closing the oldest when another opens', () => {
+    const hub = new EventHub();
+    const stream = () => ({ written: [] as string[], ended: false, write(c: string) { this.written.push(c); }, end() { this.ended = true; } });
+    const tabs = Array.from({ length: MAX_STREAMS_PER_USER + 1 }, stream);
+    const removers = tabs.map((t) => hub.add(1, t as never));
+    expect(removers.every(Boolean)).toBe(true);
+    expect(tabs[0].ended).toBe(true);
+    expect(tabs[0].written.join('')).toContain('event: replaced');
+    expect(tabs.slice(1).some((t) => t.ended)).toBe(false);
+
+    void hub.notify([1], 'game', { id: 'g', version: 1 });
+    expect(tabs[0].written.join('')).not.toContain('event: game');
+    expect(tabs[1].written.join('')).toContain('event: game');
+    // The closed tab's own cleanup afterwards is harmless.
+    removers[0]!();
+  });
+
   it('reach a browser connected to another server through Postgres NOTIFY', async () => {
     // Two hubs share one database, like two API replicas.
     const publish = async (message: string) => {
