@@ -48,13 +48,15 @@ You need the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli
    az group create --name backgammon-staging --location eastus
    ```
 
-2. **Create the registry and identities.**
+2. **Create the registry and identities.** The deploy identity trusts sign-ins from this repo's `staging` environment only. It has to match the subject in GitHub's sign-in token exactly, and repositories using GitHub's immutable subjects put numeric IDs in it (`repo:owner@123/name@456`), so read the prefix from GitHub first.
 
    ```bash
+   SUBJECT_PREFIX=$(gh api repos/jimbogray/backgammon/actions/oidc/customization/sub \
+     --jq '.sub_claim_prefix // "repo:jimbogray/backgammon"')
    az deployment group create \
      --resource-group backgammon-staging \
      --template-file infra/bootstrap.bicep \
-     --parameters githubRepo=jimbogray/backgammon
+     --parameters githubRepo=jimbogray/backgammon githubSubjectPrefix="$SUBJECT_PREFIX"
    ```
 
 3. **Create the `staging` environment in GitHub and copy the bootstrap outputs into it as variables.** These are identifiers, not secrets.
@@ -108,8 +110,9 @@ You need the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli
 
 ## Troubleshooting
 
-- **"No matching federated identity record found"** in the Sign in to Azure step: the GitHub environment name must be exactly `staging` and `githubRepo` must match the repository (`owner/name`). Re-run step 2 with the right value.
+- **"No matching federated identity record found"** in the Sign in to Azure step: the error shows the subject GitHub presented, for example `repo:jimbogray@17257014/backgammon@1382569714:environment:staging`. The part before `:environment:` must equal `githubSubjectPrefix`, and the GitHub environment name must be exactly `staging`. Re-run step 2 as written; it updates the existing credential.
 - **`unauthorized` on `docker push`, or an authorization error deploying, on the very first run:** new role assignments can take a few minutes to apply. Re-run the job.
+- **"Provisioning is restricted in this region", `ParameterOutOfRange` on the Postgres `Version`, or `AKSCapacityHeavyUsage`:** the subscription can't create that service in the resource group's region right now. `az postgres flexible-server list-skus --location <region>` shows whether a region is open to you. Set a GitHub variable `AZURE_LOCATION` on the `staging` environment (for example `eastus2`) and re-run; the app's resources go there while the resource group, registry and identities stay put. First delete anything the failed run left in the old region, because names can't move between regions: `az containerapp env delete -g backgammon-staging -n cae-backgammon-staging --yes` and `az monitor log-analytics workspace delete -g backgammon-staging -n log-backgammon-staging --force --yes`.
 - **"The subscription is not registered to use namespace …":** run the `az provider register` loop from step 1.
 - **The job times out waiting for the new API version:** check the API logs above. `password authentication failed` or `no pg_hba.conf entry` right after the first deploy usually means the Entra administrator is still being applied, and the API retries on its own as it restarts.
 - **The web app loads but every request fails:** the browser console will show a CORS error if the API's `APP_URL` doesn't match the site address. Both come from `main.bicep`, so re-running the deploy fixes a mismatch.
