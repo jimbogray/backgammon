@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import type { GameSummary } from '../../shared/api';
+import type { GameSummary, PlayerInfo } from '../../shared/api';
 import { api, inviteUrl } from '../api';
 import { useAuth } from '../auth';
 import { useGameEvents } from '../events';
@@ -20,6 +20,7 @@ export function Lobby() {
   const { me, refresh } = useAuth();
   const navigate = useNavigate();
   const [games, setGames] = useState<GameSummary[] | null>(null);
+  const [players, setPlayers] = useState<PlayerInfo[] | null>(null);
   const [opponent, setOpponent] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -29,9 +30,15 @@ export function Lobby() {
     setGames(games);
   }, []);
 
+  const loadPlayers = useCallback(async () => {
+    const { players } = await api.players();
+    setPlayers(players);
+  }, []);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadPlayers();
+  }, [load, loadPlayers]);
 
   useGameEvents(() => {
     void load();
@@ -52,7 +59,7 @@ export function Lobby() {
     setBusy(true);
     setError('');
     try {
-      const { game } = await api.challenge(opponent.trim());
+      const { game } = await api.challenge(opponent);
       navigate(`/game/${game.id}`);
     } catch (err) {
       setError((err as Error).message);
@@ -86,13 +93,23 @@ export function Lobby() {
         <section className="card new-game">
           <h2>New game</h2>
           <form onSubmit={challenge} className="inline-form">
-            <input
-              placeholder="Opponent's username"
+            <select
               value={opponent}
               onChange={(e) => setOpponent(e.target.value)}
-              aria-label="Opponent's username"
-            />
-            <button className="button primary" type="submit" disabled={busy || !opponent.trim()}>
+              onFocus={() => void loadPlayers()}
+              aria-label="Opponent"
+              disabled={!players?.length}
+            >
+              <option value="">
+                {players === null ? 'Loading players…' : players.length ? 'Choose an opponent' : 'No other players yet'}
+              </option>
+              {players?.map((p) => (
+                <option key={p.id} value={p.username}>
+                  {p.username}
+                </option>
+              ))}
+            </select>
+            <button className="button primary" type="submit" disabled={busy || !opponent}>
               Challenge
             </button>
           </form>
@@ -111,7 +128,7 @@ export function Lobby() {
         ) : games.length === 0 ? (
           <section className="card empty">
             <h2>No games yet</h2>
-            <p className="muted">Challenge someone by username, or create an invite link to get started.</p>
+            <p className="muted">Pick an opponent above, or create an invite link to get started.</p>
           </section>
         ) : null}
 

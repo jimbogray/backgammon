@@ -84,6 +84,7 @@ export const api = {
   },
   rename: (username: string) => call<{ user: Me['user'] }>('PATCH', '/api/me', { username }),
 
+  players: () => call<{ players: PlayerInfo[] }>('GET', '/api/players'),
   games: () => call<{ games: GameSummary[] }>('GET', '/api/games'),
   game: (id: string) => call<{ game: GameView }>('GET', `/api/games/${id}`),
   challenge: (opponent: string) => call<{ game: GameView }>('POST', '/api/games', { opponent }),
