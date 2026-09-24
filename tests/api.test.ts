@@ -276,6 +276,18 @@ describe('games', () => {
     expect(history.body.actions.map((a: { action: { type: string } }) => a.action.type)).toEqual(['move', 'roll', 'move']);
   });
 
+  it('lists the other players to challenge, by username only', async () => {
+    const { app } = makeApp();
+    const carol = await signup(app, 'carol');
+    await signup(app, 'Bob');
+    await signup(app, 'alice');
+    const res = await carol.get('/api/players');
+    expect(res.status).toBe(200);
+    expect(res.body.players.map((p: { username: string }) => p.username)).toEqual(['alice', 'Bob']);
+    expect(Object.keys(res.body.players[0]).sort()).toEqual(['id', 'username']);
+    expect((await request(app).get('/api/players')).status).toBe(401);
+  });
+
   it('hides games from players who are not in them', async () => {
     const { app } = makeApp();
     const alice = await signup(app, 'alice');

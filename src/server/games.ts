@@ -149,6 +149,15 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
     res.json({ games });
   });
 
+  // Everyone this user could challenge, for the lobby's opponent picker. Usernames only, never emails.
+  router.get('/api/players', async (req, res) => {
+    const { rows } = await db.query<PlayerInfo>(
+      'SELECT id, username FROM users WHERE id <> $1 ORDER BY lower(username) LIMIT 1000',
+      [req.user!.id],
+    );
+    res.json({ players: rows });
+  });
+
   // Start a game against a registered player, or create an invite link.
   router.post('/api/games', async (req, res) => {
     const me = req.user!;
