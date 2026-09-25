@@ -28,7 +28,7 @@ export function MatchesPage() {
     void load();
   }, [load]);
 
-  // Any started game changing is news here; batch bursts of moves into one refetch.
+  // Any started game changing is news here; batch them into at most one refetch every 2s to stay well inside the API rate limit.
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
   useGameEvents((e) => {
@@ -36,7 +36,7 @@ export function MatchesPage() {
     timer.current = setTimeout(() => {
       timer.current = null;
       void load();
-    }, 500);
+    }, 2000);
   });
 
   const live = matches?.filter((m) => m.status === 'active') ?? [];

@@ -41,7 +41,7 @@ export function Lobby() {
   }, [load, loadPlayers]);
 
   // Every started game's changes reach every browser now (for spectators), so
-  // batch bursts of them into one refetch.
+  // batch them into at most one refetch every 2s (the API allows 300 requests a minute per user).
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
   useGameEvents((e) => {
@@ -51,7 +51,7 @@ export function Lobby() {
       timer.current = null;
       void load();
       void refresh();
-    }, 500);
+    }, 2000);
   });
 
   const yourTurn = games?.filter((g) => g.status === 'active' && g.yourTurn) ?? [];
