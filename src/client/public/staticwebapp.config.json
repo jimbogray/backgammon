@@ -1,20 +1,31 @@
 {
   "navigationFallback": {
     "rewrite": "/index.html",
-    "exclude": ["/assets/*", "*.{css,js,svg,png,ico,json,txt}"]
+    "exclude": [
+      "/assets/*",
+      "*.{css,js,svg,png,ico,json,txt}"
+    ]
   },
   "globalHeaders": {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' %API_ORIGIN%; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "strict-origin-when-cross-origin"
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()"
   },
   "routes": [
     {
       "route": "/assets/*",
-      "headers": { "Cache-Control": "public, max-age=31536000, immutable" }
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      }
     },
     {
       "route": "/index.html",
-      "headers": { "Cache-Control": "no-cache" }
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
     }
   ]
 }

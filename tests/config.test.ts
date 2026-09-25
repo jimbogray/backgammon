@@ -35,6 +35,19 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ NODE_ENV: 'production', APP_URL: 'https://app.example.com' })).toThrow(/DATABASE_URL/);
   });
 
+  it('reads the limited database identity the API serves requests as', () => {
+    const env = {
+      DATABASE_AUTH: 'entra',
+      DATABASE_APP_USER: 'id-app',
+      DATABASE_APP_CLIENT_ID: 'client',
+      DATABASE_APP_OBJECT_ID: 'object',
+    };
+    expect(loadConfig(env).databaseAppRole).toEqual({ user: 'id-app', clientId: 'client', objectId: 'object' });
+    expect(loadConfig({}).databaseAppRole).toBeNull();
+    expect(() => loadConfig({ ...env, DATABASE_AUTH: 'password' })).toThrow(/DATABASE_APP_USER/);
+    expect(() => loadConfig({ ...env, DATABASE_APP_OBJECT_ID: '' })).toThrow(/DATABASE_APP_USER/);
+  });
+
   it('rejects unknown database auth modes', () => {
     expect(() => loadConfig({ DATABASE_AUTH: 'kerberos' })).toThrow(/DATABASE_AUTH/);
   });

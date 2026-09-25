@@ -20,7 +20,8 @@ Infrastructure changes ship the same way as code: edit `main.bicep` in a pull re
 
 - **Sign-in across two origins.** The web app and API have different addresses, so the browser sends a session token in an `Authorization` header instead of a cookie. Safari blocks cookies set by another site, so a cookie would not work there. The API allows only the web app's origin (CORS).
 - **Google sign-in** starts and finishes on the API. Google redirects back to the API's `/api/auth/google/callback`. The API then sends the browser to the web app's `/auth/complete` page with a one-time code, and the page exchanges that code for a session token.
-- **Database sign-in has no password.** The API runs as a managed identity that is the Postgres server's Microsoft Entra administrator, and password sign-in is turned off. On first start the API creates the `backgammon` database and its tables. Schema migrations run on every start.
+- **Database sign-in has no password.** Password sign-in is turned off, and the API signs in with managed identities. On startup it signs in as `id-backgammon-staging-api`, the Postgres server's Microsoft Entra administrator, to create the `backgammon` database, run schema migrations and give `id-backgammon-staging-api-db` a role that can read and write the app's tables. It then closes that connection and serves every request as `id-backgammon-staging-api-db`, which can't change the schema, drop tables or reach other databases.
+- **Postgres is reachable from Azure's IP ranges** (the "allow Azure services" firewall rule), because Consumption-plan Container Apps have no fixed outbound address. Signing in still needs a Microsoft Entra token for one of the identities above. Closing it off completely means putting the Container Apps environment on a virtual network with private access to Postgres, which costs more.
 - **Live updates** travel between API replicas through Postgres `LISTEN`/`NOTIFY`, so the API can scale out.
 
 ### Who can do what
@@ -28,7 +29,8 @@ Infrastructure changes ship the same way as code: edit `main.bicep` in a pull re
 | Identity | Created by | Can |
 | --- | --- | --- |
 | `id-backgammon-staging-deploy` | `bootstrap.bicep` | Sign in from this repo's `staging` GitHub environment only (OIDC, no secret). Contributor on this resource group, push to the registry. It can't assign roles. |
-| `id-backgammon-staging-api` | `bootstrap.bicep` | Pull images from the registry. Administer the Postgres server. |
+| `id-backgammon-staging-api` | `bootstrap.bicep` | Pull images from the registry. Administer the Postgres server (used only at API startup). |
+| `id-backgammon-staging-api-db` | `main.bicep` | Read and write the app's tables in the `backgammon` database. The API serves requests as this identity. |
 
 Rough cost: Postgres B1ms plus 32 GB storage about US$16/month, Basic registry about US$5/month, and one always-on 0.25 vCPU API replica is mostly covered by the Container Apps free grant. The Static Web App is on the free tier. Set `apiMinReplicas=0` in `main.bicep` to scale the API to zero when idle, at the cost of a slow first request.
 
