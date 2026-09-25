@@ -510,8 +510,13 @@ describe('live updates', () => {
     expect(game.state?.lastTurn?.moves).toEqual([first, { from: 5, to: 4, die: 1 }]);
     expect(events().at(-1)?.data.action).toEqual({ type: 'move', by: 'white', moves: [{ from: 5, to: 4, die: 1 }] });
 
-    await bob.post(`/api/games/${game.id}/actions`).send({ action: { type: 'roll' }, version: game.version });
-    expect(events().at(-1)?.data.action).toEqual({ type: 'roll', by: 'black' });
+    const rolled = await bob.post(`/api/games/${game.id}/actions`).send({ action: { type: 'roll' }, version: game.version });
+    // Every screen tumbles the dice for the same time, about two seconds.
+    const rollMs = events().at(-1)?.data.action.rollMs;
+    expect(events().at(-1)?.data.action).toEqual({ type: 'roll', by: 'black', rollMs });
+    expect(rollMs).toBeGreaterThanOrEqual(1600);
+    expect(rollMs).toBeLessThanOrEqual(2600);
+    expect(rolled.body.rollMs).toBe(rollMs);
 
     const history = await alice.get(`/api/games/${game.id}/history`);
     expect(history.body.actions.map((a: { action: { moves?: unknown[] } }) => a.action.moves?.length)).toEqual([1, 1, undefined]);

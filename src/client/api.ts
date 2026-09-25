@@ -95,7 +95,7 @@ export const api = {
     call<{ gameId: string; from: PlayerInfo; status: string; joined: boolean }>('GET', `/api/invites/${code}`),
   joinInvite: (code: string) => call<{ game: GameView }>('POST', `/api/invites/${code}/join`, {}),
   act: (id: string, action: Action, version: number) =>
-    call<{ game: GameView }>('POST', `/api/games/${id}/actions`, { action, version }),
+    call<{ game: GameView; rollMs?: number }>('POST', `/api/games/${id}/actions`, { action, version }),
 };
 
 export function googleSignInUrl(next: string): string {

@@ -32,8 +32,8 @@ function describeTurn(turn: TurnRecord, name: string): string {
   return `${name} rolled ${roll}: ${turn.moves.map((m) => notation(turn.color, m)).join(' ')}`;
 }
 
-/** How long the dice tumble before showing what was rolled. */
-const ROLL_MS = 900;
+/** How long the dice tumble when the server doesn't say (it picks about two seconds per roll). */
+const ROLL_MS = 2000;
 
 function randomFaces(): number[] {
   return [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
@@ -41,27 +41,44 @@ function randomFaces(): number[] {
 
 /**
  * Tumbling dice shown while a roll is under way, on the roller's screen and
- * on every other screen watching the game.
+ * on every other screen watching the game. The faces flicker fast at first and
+ * slow down as the roll settles, for a bit of suspense.
  */
 function useRollAnimation() {
   const [roll, setRoll] = useState<{ color: Color; faces: number[] } | null>(null);
-  const timers = useRef<{ tick?: ReturnType<typeof setInterval>; end?: ReturnType<typeof setTimeout> }>({});
+  const timers = useRef<{ tick?: ReturnType<typeof setTimeout>; end?: ReturnType<typeof setTimeout> }>({});
+  const run = useRef({ color: 'white' as Color, startedAt: 0, ms: ROLL_MS });
 
   const stop = useCallback(() => {
-    clearInterval(timers.current.tick);
+    clearTimeout(timers.current.tick);
     clearTimeout(timers.current.end);
     timers.current = {};
     setRoll(null);
   }, []);
 
+  const tick = useCallback(() => {
+    const { color, startedAt, ms } = run.current;
+    setRoll({ color, faces: randomFaces() });
+    const progress = Math.min(1, (performance.now() - startedAt) / ms);
+    timers.current.tick = setTimeout(tick, 60 + 280 * progress * progress);
+  }, []);
+
+  /** Starts the roll, or when it's already going, sets how long it lasts in all (`ms` from the server). */
   const start = useCallback(
-    (color: Color) => {
-      if (timers.current.end) return; // already rolling
-      setRoll({ color, faces: randomFaces() });
-      timers.current.tick = setInterval(() => setRoll({ color, faces: randomFaces() }), 90);
-      timers.current.end = setTimeout(stop, ROLL_MS);
+    (color: Color, ms?: number) => {
+      const rolling = Boolean(timers.current.end);
+      if (!rolling) {
+        run.current = { color, startedAt: performance.now(), ms: ms ?? ROLL_MS };
+        tick();
+      } else if (ms) {
+        run.current.ms = ms;
+      } else {
+        return;
+      }
+      clearTimeout(timers.current.end);
+      timers.current.end = setTimeout(stop, Math.max(0, run.current.startedAt + run.current.ms - performance.now()));
     },
-    [stop],
+    [stop, tick],
   );
 
   useEffect(() => stop, [stop]);
@@ -110,7 +127,7 @@ export function GamePage() {
     }
     if (e.id !== id) return;
     const a = e.action;
-    if (a?.type === 'roll') startRoll(a.by);
+    if (a?.type === 'roll') startRoll(a.by, a.rollMs);
     // This player's own moves are animated as they're made.
     const last = a?.type === 'move' && a.by !== game?.you ? a.moves?.at(-1) : undefined;
     void load(last && a ? { move: last, color: a.by, key: `r${e.version}` } : undefined);
@@ -157,7 +174,8 @@ export function GamePage() {
     setError('');
     if (action.type === 'roll' && you) startRoll(you);
     try {
-      const { game: next } = await api.act(game.id, action, game.version);
+      const { game: next, rollMs } = await api.act(game.id, action, game.version);
+      if (action.type === 'roll' && you && rollMs) startRoll(you, rollMs);
       setGame(next);
       setPending([]);
       // After a move, keep the checker selected if it can go on moving.

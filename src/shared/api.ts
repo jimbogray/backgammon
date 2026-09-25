@@ -36,7 +36,14 @@ export interface GameEvent {
   id: string;
   version: number;
   /** What changed it, when a player acted (absent when a game starts). */
-  action?: { type: Action['type']; by: Color; /** For a move: the checkers it moved, in order. */ moves?: Move[] };
+  action?: {
+    type: Action['type'];
+    by: Color;
+    /** For a move: the checkers it moved, in order. */
+    moves?: Move[];
+    /** For a roll: how long every screen tumbles the dice before showing them. */
+    rollMs?: number;
+  };
 }
 
 

@@ -367,8 +367,14 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       return;
     }
     const by = colorOf(outcome.row, me.id)!;
-    await announce(outcome.row, action.type === 'move' ? { type: 'move', by, moves: outcome.moved } : { type: action.type, by });
-    res.json({ game: await view(outcome.row, me.id) });
+    // A roll tumbles for about two seconds, a little longer or shorter each time,
+    // and the same length on every screen.
+    const rollMs = action.type === 'roll' ? crypto.randomInt(1600, 2601) : undefined;
+    await announce(
+      outcome.row,
+      action.type === 'move' ? { type: 'move', by, moves: outcome.moved } : { type: action.type, by, ...(rollMs ? { rollMs } : {}) },
+    );
+    res.json({ game: await view(outcome.row, me.id), ...(rollMs ? { rollMs } : {}) });
   });
 
 
