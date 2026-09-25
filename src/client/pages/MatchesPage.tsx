@@ -31,8 +31,8 @@ export function MatchesPage() {
   // Any started game changing is news here; batch them into at most one refetch every 2s to stay well inside the API rate limit.
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
-  useGameEvents((e) => {
-    if (e.kind === 'preview' || timer.current) return;
+  useGameEvents(() => {
+    if (timer.current) return;
     timer.current = setTimeout(() => {
       timer.current = null;
       void load();

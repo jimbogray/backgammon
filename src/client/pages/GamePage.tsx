@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { GameView, MovePreview } from '../../shared/api';
+import type { GameView } from '../../shared/api';
 import {
   Action,
   availableMoves,
@@ -11,6 +11,7 @@ import {
   pipCount,
   pipDistance,
   TurnRecord,
+  turnSoFar,
 } from '../../shared/engine';
 import { api, ApiError, inviteUrl } from '../api';
 import { Board, Motion, Spot } from '../components/Board';
@@ -31,8 +32,8 @@ function describeTurn(turn: TurnRecord, name: string): string {
   return `${name} rolled ${roll}: ${turn.moves.map((m) => notation(turn.color, m)).join(' ')}`;
 }
 
-/** How long the dice tumble before showing what was rolled. */
-const ROLL_MS = 900;
+/** How long the dice tumble when the server doesn't say (it picks about two seconds per roll). */
+const ROLL_MS = 2000;
 
 function randomFaces(): number[] {
   return [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
@@ -40,27 +41,44 @@ function randomFaces(): number[] {
 
 /**
  * Tumbling dice shown while a roll is under way, on the roller's screen and
- * on every other screen watching the game.
+ * on every other screen watching the game. The faces flicker fast at first and
+ * slow down as the roll settles, for a bit of suspense.
  */
 function useRollAnimation() {
   const [roll, setRoll] = useState<{ color: Color; faces: number[] } | null>(null);
-  const timers = useRef<{ tick?: ReturnType<typeof setInterval>; end?: ReturnType<typeof setTimeout> }>({});
+  const timers = useRef<{ tick?: ReturnType<typeof setTimeout>; end?: ReturnType<typeof setTimeout> }>({});
+  const run = useRef({ color: 'white' as Color, startedAt: 0, ms: ROLL_MS });
 
   const stop = useCallback(() => {
-    clearInterval(timers.current.tick);
+    clearTimeout(timers.current.tick);
     clearTimeout(timers.current.end);
     timers.current = {};
     setRoll(null);
   }, []);
 
+  const tick = useCallback(() => {
+    const { color, startedAt, ms } = run.current;
+    setRoll({ color, faces: randomFaces() });
+    const progress = Math.min(1, (performance.now() - startedAt) / ms);
+    timers.current.tick = setTimeout(tick, 60 + 280 * progress * progress);
+  }, []);
+
+  /** Starts the roll, or when it's already going, sets how long it lasts in all (`ms` from the server). */
   const start = useCallback(
-    (color: Color) => {
-      if (timers.current.end) return; // already rolling
-      setRoll({ color, faces: randomFaces() });
-      timers.current.tick = setInterval(() => setRoll({ color, faces: randomFaces() }), 90);
-      timers.current.end = setTimeout(stop, ROLL_MS);
+    (color: Color, ms?: number) => {
+      const rolling = Boolean(timers.current.end);
+      if (!rolling) {
+        run.current = { color, startedAt: performance.now(), ms: ms ?? ROLL_MS };
+        tick();
+      } else if (ms) {
+        run.current.ms = ms;
+      } else {
+        return;
+      }
+      clearTimeout(timers.current.end);
+      timers.current.end = setTimeout(stop, Math.max(0, run.current.startedAt + run.current.ms - performance.now()));
     },
-    [stop],
+    [stop, tick],
   );
 
   useEffect(() => stop, [stop]);
@@ -71,11 +89,10 @@ export function GamePage() {
   const { id = '' } = useParams();
   const [game, setGame] = useState<GameView | null>(null);
   const [error, setError] = useState('');
+  // A move sent to the server and shown straight away, until the reply arrives.
   const [pending, setPending] = useState<Move[]>([]);
   const [selected, setSelected] = useState<Spot | null>(null);
   const [busy, setBusy] = useState(false);
-  // The other player's moves in a turn they haven't confirmed yet.
-  const [remote, setRemote] = useState<MovePreview | null>(null);
   const [motion, setMotion] = useState<Motion | null>(null);
   const { roll, start: startRoll, stop: stopRoll } = useRollAnimation();
 
@@ -84,14 +101,14 @@ export function GamePage() {
     versionRef.current = game?.version ?? null;
   }, [game]);
 
-  const load = useCallback(async () => {
+  /** Fetches the game; `moved` is a move someone else just made, to animate once the new board is in. */
+  const load = useCallback(async (moved?: Motion) => {
     try {
       const { game } = await api.game(id);
-      // Only drop a half-built turn if the game actually changed underneath it.
       if (versionRef.current !== game.version) {
         setPending([]);
         setSelected(null);
-        setMotion(null);
+        setMotion(moved ?? null);
       }
       setGame(game);
     } catch (err) {
@@ -109,19 +126,11 @@ export function GamePage() {
       return;
     }
     if (e.id !== id) return;
-    if (e.kind === 'preview') {
-      if (e.by === game?.you) return; // this player's own moves, from another of their tabs
-      const before = remote?.version === e.version ? remote.moves.length : 0;
-      setRemote(e);
-      setMotion(
-        e.moves.length > before
-          ? { move: e.moves[e.moves.length - 1], color: e.by, key: `r${e.version}-${e.moves.length}` }
-          : null,
-      );
-      return;
-    }
-    if (e.action?.type === 'roll') startRoll(e.action.by);
-    void load();
+    const a = e.action;
+    if (a?.type === 'roll') startRoll(a.by, a.rollMs);
+    // This player's own moves are animated as they're made.
+    const last = a?.type === 'move' && a.by !== game?.you ? a.moves?.at(-1) : undefined;
+    void load(last && a ? { move: last, color: a.by, key: `r${e.version}` } : undefined);
   });
 
   const state = game?.state ?? null;
@@ -144,21 +153,9 @@ export function GamePage() {
     }
   }, [state, you, pending]);
 
-  // The board as the other player has it partway through their turn.
-  const remoteProgress = useMemo(() => {
-    if (!state || !game || !remote || state.phase !== 'moving' || state.turn === you) return null;
-    if (remote.version !== game.version || remote.by !== state.turn) return null;
-    try {
-      return availableMoves(state, remote.by, remote.moves).progress;
-    } catch {
-      return null;
-    }
-  }, [state, game, remote, you]);
-
   const legal = turnInfo?.legal ?? [];
   const myMoving = Boolean(state && you && state.phase === 'moving' && state.turn === you);
-  const displayBoard = myMoving && turnInfo ? turnInfo.progress.board : (remoteProgress?.board ?? state?.board);
-  const turnComplete = myMoving && legal.length === 0;
+  const displayBoard = myMoving && turnInfo ? turnInfo.progress.board : state?.board;
 
   useEffect(() => {
     if (!state || !you) return;
@@ -171,20 +168,18 @@ export function GamePage() {
     };
   }, [state, you]);
 
-  function sendPreview(moves: Move[]) {
-    if (game) api.preview(game.id, moves, game.version).catch(() => {});
-  }
-
   async function act(action: Action) {
     if (!game) return;
     setBusy(true);
     setError('');
     if (action.type === 'roll' && you) startRoll(you);
     try {
-      const { game: next } = await api.act(game.id, action, game.version);
+      const { game: next, rollMs } = await api.act(game.id, action, game.version);
+      if (action.type === 'roll' && you && rollMs) startRoll(you, rollMs);
       setGame(next);
       setPending([]);
-      setSelected(null);
+      // After a move, keep the checker selected if it can go on moving.
+      if (action.type !== 'move' || next.state?.phase !== 'moving' || next.state.turn !== you) setSelected(null);
     } catch (err) {
       if (action.type === 'roll') stopRoll();
       setError((err as Error).message);
@@ -210,10 +205,11 @@ export function GamePage() {
       const move = legal
         .filter((m) => m.from === selected && m.to === spot)
         .sort((a, b) => a.die - b.die)[0];
+      // Moves are final: show it now and save it straight away.
       const next = [...pending, move];
       setPending(next);
       setMotion({ move, color: you!, key: `l${game!.version}-${next.length}` });
-      sendPreview(next);
+      void act({ type: 'move', moves: [move] });
       // Keep the same checker selected if it can keep moving.
       try {
         const after = availableMoves(state!, you!, next);
@@ -296,8 +292,6 @@ export function GamePage() {
     prompt = state.phase === 'rolling' ? `Waiting for ${names[them]} to roll.` : `Waiting for ${names[them]} to move.`;
   } else if (state.phase === 'rolling') {
     prompt = 'Your turn. Roll the dice.';
-  } else if (turnComplete) {
-    prompt = 'Done moving. Confirm your turn or undo.';
   } else if (selected !== null) {
     prompt = 'Choose where to move the checker.';
   } else {
@@ -320,7 +314,12 @@ export function GamePage() {
     ? null
     : myMoving
       ? (turnInfo?.progress.remaining ?? null)
-      : (remoteProgress?.remaining ?? (unplayable && !state.dice ? [] : null));
+      : state.phase === 'moving'
+        ? turnSoFar(state, state.turn).remaining
+        : unplayable && !state.dice
+          ? []
+          : null;
+  const playedThisTurn = state.phase === 'moving' ? (state.played ?? []) : [];
 
   return (
     <>
@@ -376,30 +375,6 @@ export function GamePage() {
                   )}
                 </>
               )}
-              {myMoving && (
-                <>
-                  <button
-                    className="button primary"
-                    onClick={() => act({ type: 'move', moves: pending })}
-                    disabled={busy || !turnComplete || Boolean(roll)}
-                  >
-                    Confirm move
-                  </button>
-                  <button
-                    className="button"
-                    onClick={() => {
-                      const next = pending.slice(0, -1);
-                      setPending(next);
-                      setSelected(null);
-                      setMotion(null);
-                      sendPreview(next);
-                    }}
-                    disabled={busy || pending.length === 0}
-                  >
-                    Undo
-                  </button>
-                </>
-              )}
               {state.phase === 'doubling' && state.doubleOfferedBy === them && (
                 <>
                   <button className="button primary" onClick={() => act({ type: 'take' })} disabled={busy}>
@@ -428,8 +403,11 @@ export function GamePage() {
               )}
             </div>
           )}
-          {myMoving && pending.length > 0 && (
-            <p className="muted small">This turn: {pending.map((m) => notation(seat, m)).join(' ')}</p>
+          {playedThisTurn.length > 0 && (
+            <p className="muted small">
+              {state.turn === you ? 'This turn' : `${names[state.turn]} this turn`}:{' '}
+              {playedThisTurn.map((m) => notation(state.turn, m)).join(' ')}
+            </p>
           )}
         </div>
       </main>

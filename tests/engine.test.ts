@@ -127,11 +127,31 @@ describe('moves', () => {
     expect(next.board.points[7]).toBe(1);
   });
 
-  it('rejects an incomplete turn when more dice could be played', () => {
+  it('keeps each move and the turn until every playable die is used', () => {
     const g = stateWith(initialBoard(), { turn: 'white', dice: [3, 1], phase: 'moving' });
-    expect(() =>
-      applyAction(g, 'white', { type: 'move', moves: [{ from: 7, to: 4, die: 3 }] }, seq()),
-    ).toThrow(GameError);
+    const half = applyAction(g, 'white', { type: 'move', moves: [{ from: 7, to: 4, die: 3 }] }, seq());
+    expect(half).toMatchObject({ turn: 'white', phase: 'moving', played: [{ from: 7, to: 4, die: 3 }] });
+    expect(half.board.points[4]).toBe(1);
+    expect(availableMoves(half, 'white').legal.every((m) => m.die === 1)).toBe(true);
+    // The 3 can't be played twice.
+    expect(() => applyAction(half, 'white', { type: 'move', moves: [{ from: 7, to: 4, die: 3 }] }, seq())).toThrow(GameError);
+    const done = applyAction(half, 'white', { type: 'move', moves: [{ from: 5, to: 4, die: 1 }] }, seq());
+    expect(done).toMatchObject({ turn: 'black', phase: 'rolling', played: [] });
+    expect(done.lastTurn?.moves).toHaveLength(2);
+  });
+
+  it('still applies the larger-die rule after moves made one at a time', () => {
+    const b = emptyBoard();
+    b.points[12] = 1;
+    b.points[7] = -2;
+    b.points[9] = -2;
+    b.points[4] = -2;
+    b.points[0] = -9;
+    b.off.white = 14;
+    const g = stateWith(b, { turn: 'white', dice: [6, 2], phase: 'moving' });
+    expect(() => applyAction(g, 'white', { type: 'move', moves: [{ from: 12, to: 10, die: 2 }] }, seq())).toThrow(GameError);
+    const next = applyAction(g, 'white', { type: 'move', moves: [{ from: 12, to: 6, die: 6 }] }, seq());
+    expect(next.turn).toBe('black');
   });
 
   it('rejects moves by the player who is not on turn', () => {

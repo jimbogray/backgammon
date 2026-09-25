@@ -41,6 +41,12 @@ export interface GameState {
   doubleOfferedBy: Color | null;
   openingRoll: { white: number; black: number };
   lastTurn: TurnRecord | null;
+  /**
+   * Checkers already moved this turn. Each move is final as soon as it's made,
+   * so `board` already includes them. Absent in games saved before moves were
+   * made one at a time, which means none yet.
+   */
+  played?: Move[];
   turnNumber: number;
   result: null | {
     winner: Color;
@@ -242,9 +248,13 @@ export interface TurnProgress {
 
 /** Replay `played` moves from the start of a turn. Throws if any move is illegal. */
 export function replayTurn(start: Board, color: Color, dice: number[], played: Move[]): TurnProgress {
-  const total = maxPlayable(start, color, diceToPlay(dice));
-  let progress: TurnProgress = { board: start, remaining: diceToPlay(dice), played: [] };
-  for (const move of played) {
+  return continueTurn({ board: start, remaining: diceToPlay(dice), played: [] }, color, dice, played);
+}
+
+/** Play more `moves` on from `progress`. Throws if any move is illegal. */
+export function continueTurn(progress: TurnProgress, color: Color, dice: number[], moves: Move[]): TurnProgress {
+  const total = progress.played.length + maxPlayable(progress.board, color, progress.remaining);
+  for (const move of moves) {
     const legal = legalNextMoves(progress, color, dice, total);
     const match = legal.find((m) => sameMove(m, move));
     if (!match) throw new Error('Illegal move');
@@ -270,7 +280,7 @@ export function legalNextMoves(
   progress: TurnProgress,
   color: Color,
   dice: number[],
-  total: number = maxPlayable(progress.board, color, progress.remaining),
+  total: number = progress.played.length + maxPlayable(progress.board, color, progress.remaining),
 ): Move[] {
   const needed = total - progress.played.length;
   if (needed <= 0) return [];
@@ -319,6 +329,7 @@ export function newGame(roll: Roller): GameState {
     doubleOfferedBy: null,
     openingRoll: { white, black },
     lastTurn: null,
+    played: [],
     turnNumber: 1,
     result: null,
   };
@@ -352,6 +363,7 @@ function passTurn(state: GameState, record: TurnRecord, board: Board): GameState
     turn: opponent(state.turn),
     phase: 'rolling',
     dice: null,
+    played: [],
     lastTurn: record,
     turnNumber: state.turnNumber + 1,
   };
@@ -401,7 +413,7 @@ export function applyAction(state: GameState, actor: Color, action: Action, roll
         // No legal moves: the turn passes automatically.
         return passTurn(state, { color: actor, dice, moves: [] }, state.board);
       }
-      return { ...state, phase: 'moving', dice };
+      return { ...state, phase: 'moving', dice, played: [] };
     }
 
     case 'move': {
@@ -409,25 +421,26 @@ export function applyAction(state: GameState, actor: Color, action: Action, roll
         throw new GameError('It is not your turn to move');
       }
       if (!Array.isArray(action.moves)) throw new GameError('Invalid moves');
-      const total = maxPlayable(state.board, actor, diceToPlay(state.dice));
+      if (action.moves.length === 0) throw new GameError('Choose a checker to move');
       let progress: TurnProgress;
       try {
-        progress = replayTurn(state.board, actor, state.dice, action.moves.map(normalizeMove));
+        progress = continueTurn(turnSoFar(state, actor), actor, state.dice, action.moves.map(normalizeMove));
       } catch {
         throw new GameError('Illegal move');
       }
       const record: TurnRecord = { color: actor, dice: state.dice, moves: progress.played };
       if (progress.board.off[actor] === CHECKERS_PER_SIDE) {
         return finish(
-          { ...state, board: progress.board, lastTurn: record },
+          { ...state, board: progress.board, played: [], lastTurn: record },
           actor,
           'bearoff',
           resultType(progress.board, actor),
           state.cube.value,
         );
       }
-      if (progress.played.length !== total) throw new GameError('You must play as many dice as possible');
-      return passTurn(state, record, progress.board);
+      // The turn ends by itself once no more dice can be played.
+      if (legalNextMoves(progress, actor, state.dice).length === 0) return passTurn(state, record, progress.board);
+      return { ...state, board: progress.board, played: progress.played };
     }
 
     default:
@@ -446,12 +459,19 @@ function normalizeMove(raw: unknown): Move {
   return { from, to, die };
 }
 
-/** Moves available to the player right now, given partial moves already made this turn. */
-export function availableMoves(state: GameState, color: Color, played: Move[]): { progress: TurnProgress; legal: Move[] } {
+/** Where the player on turn has got to: the board with this turn's moves made, and the dice left. */
+export function turnSoFar(state: GameState, color: Color): TurnProgress {
+  const played = state.played ?? [];
+  let remaining = state.dice ? diceToPlay(state.dice) : [];
+  for (const m of played) remaining = removeOne(remaining, m.die);
+  return { board: state.board, remaining, played };
+}
+
+/** Moves available to the player right now, after this turn's moves so far and any `extra` ones. */
+export function availableMoves(state: GameState, color: Color, extra: Move[] = []): { progress: TurnProgress; legal: Move[] } {
   if (state.phase !== 'moving' || state.turn !== color || !state.dice) {
     return { progress: { board: state.board, remaining: [], played: [] }, legal: [] };
   }
-  const total = maxPlayable(state.board, color, diceToPlay(state.dice));
-  const progress = replayTurn(state.board, color, state.dice, played);
-  return { progress, legal: legalNextMoves(progress, color, state.dice, total) };
+  const progress = continueTurn(turnSoFar(state, color), color, state.dice, extra);
+  return { progress, legal: legalNextMoves(progress, color, state.dice) };
 }

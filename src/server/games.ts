@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { Action, applyAction, Color, GameError, GameState, Move, newGame, pipCount, replayTurn, Roller } from '../shared/engine.js';
-import type { GameEvent, GameSummary, GameView, MatchSummary, MovePreview, PlayerInfo } from '../shared/api.js';
+import { Action, applyAction, Color, GameError, GameState, Move, newGame, pipCount, Roller } from '../shared/engine.js';
+import type { GameEvent, GameSummary, GameView, MatchSummary, PlayerInfo } from '../shared/api.js';
 import { requireUser, User } from './auth.js';
 import type { Database, Queryable } from './db.js';
 import type { EventHub } from './events.js';
@@ -344,14 +344,20 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
          WHERE id = $5 RETURNING *`,
         [JSON.stringify(next), finished ? 'finished' : 'active', winnerId, next.result?.points ?? null, row.id],
       );
-      const logged = action.type === 'move' ? { type: 'move', moves: next.lastTurn?.moves ?? [] } : { type: action.type };
+      // Only the checkers this request moved; earlier moves this turn were logged already.
+      let moved: Move[] = [];
+      if (action.type === 'move') {
+        const turnMoves = next.phase === 'moving' && next.turn === color ? (next.played ?? []) : (next.lastTurn?.moves ?? []);
+        moved = turnMoves.slice(row.state.played?.length ?? 0);
+      }
+      const logged = action.type === 'move' ? { type: 'move', moves: moved } : { type: action.type };
       const withDice = action.type === 'roll' ? { ...logged, dice: next.dice ?? next.lastTurn?.dice } : logged;
       await tx.query('INSERT INTO game_actions (game_id, user_id, action) VALUES ($1, $2, $3)', [
         row.id,
         me.id,
         JSON.stringify(withDice),
       ]);
-      return { row: updated.rows[0] } as const;
+      return { row: updated.rows[0], moved } as const;
     });
 
     if ('error' in outcome) {
@@ -360,43 +366,17 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       res.status(outcome.status!).json(body);
       return;
     }
-    await announce(outcome.row, { type: action.type, by: colorOf(outcome.row, me.id)! });
-    res.json({ game: await view(outcome.row, me.id) });
+    const by = colorOf(outcome.row, me.id)!;
+    // A roll tumbles for about two seconds, a little longer or shorter each time,
+    // and the same length on every screen.
+    const rollMs = action.type === 'roll' ? crypto.randomInt(1600, 2601) : undefined;
+    await announce(
+      outcome.row,
+      action.type === 'move' ? { type: 'move', by, moves: outcome.moved } : { type: action.type, by, ...(rollMs ? { rollMs } : {}) },
+    );
+    res.json({ game: await view(outcome.row, me.id), ...(rollMs ? { rollMs } : {}) });
   });
 
-  // Checkers moved so far in a turn that isn't confirmed yet, so the other
-  // screens watching the game can show them as they happen. Nothing is saved:
-  // the turn still counts only once it's sent to /actions.
-  router.post('/api/games/:id/preview', async (req, res) => {
-    const me = req.user!;
-    const moves = req.body?.moves as Move[] | undefined;
-    const version = Number(req.body?.version);
-    if (!Array.isArray(moves) || moves.length > 4 || !Number.isFinite(version)) {
-      res.status(400).json({ error: 'Send the moves made so far and the game version' });
-      return;
-    }
-    const row = await getRow(db, req.params.id);
-    if (!row || !canSee(row, me.id)) {
-      res.status(404).json({ error: 'Game not found' });
-      return;
-    }
-    const color = colorOf(row, me.id);
-    const state = row.state;
-    if (row.version !== version || !state || state.phase !== 'moving' || state.turn !== color || !state.dice) {
-      res.status(409).json({ error: 'It is not your turn to move' });
-      return;
-    }
-    let played: Move[];
-    try {
-      played = replayTurn(state.board, color, state.dice, moves).played;
-    } catch {
-      res.status(400).json({ error: 'Illegal move' });
-      return;
-    }
-    const data: MovePreview = { id: row.id, version: row.version, by: color, moves: played };
-    await hub.notify(audience(row), 'preview', data);
-    res.status(204).end();
-  });
 
   return router;
 }
