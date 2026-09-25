@@ -1,7 +1,8 @@
 import type { Response } from 'express';
 
 export interface EventMessage {
-  userIds: number[];
+  /** Who should hear about it, or '*' for every connected browser. */
+  userIds: number[] | '*';
   event: string;
   data: unknown;
 }
@@ -33,9 +34,9 @@ export class EventHub {
     };
   }
 
-  async notify(userIds: Array<number | null | undefined>, event: string, data: unknown): Promise<void> {
+  async notify(userIds: Array<number | null | undefined> | '*', event: string, data: unknown): Promise<void> {
     const message: EventMessage = {
-      userIds: [...new Set(userIds)].filter((id): id is number => id != null),
+      userIds: userIds === '*' ? '*' : [...new Set(userIds)].filter((id): id is number => id != null),
       event,
       data,
     };
@@ -67,6 +68,10 @@ export class EventHub {
 
   private deliver({ userIds, event, data }: EventMessage): void {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    if (userIds === '*') {
+      for (const set of this.streams.values()) for (const res of set) res.write(payload);
+      return;
+    }
     for (const id of userIds) {
       for (const res of this.streams.get(id) ?? []) res.write(payload);
     }

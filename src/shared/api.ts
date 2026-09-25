@@ -47,3 +47,16 @@ export interface MovePreview {
   by: Color;
   moves: Move[];
 }
+
+/** A started game as listed on the matches screen, for anyone to watch. */
+export interface MatchSummary {
+  id: string;
+  status: 'active' | 'finished';
+  players: { white: PlayerInfo | null; black: PlayerInfo | null };
+  /** Who the game is waiting on, or null once it's over. */
+  turn: Color | null;
+  cube: number;
+  pips: { white: number; black: number } | null;
+  result: { winner: Color; points: number; reason: EndReason } | null;
+  updatedAt: string;
+}

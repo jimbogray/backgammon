@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { Action, applyAction, Color, GameError, GameState, Move, newGame, replayTurn, Roller } from '../shared/engine.js';
-import type { GameEvent, GameSummary, GameView, MovePreview, PlayerInfo } from '../shared/api.js';
+import { Action, applyAction, Color, GameError, GameState, Move, newGame, pipCount, replayTurn, Roller } from '../shared/engine.js';
+import type { GameEvent, GameSummary, GameView, MatchSummary, MovePreview, PlayerInfo } from '../shared/api.js';
 import { requireUser, User } from './auth.js';
 import type { Database, Queryable } from './db.js';
 import type { EventHub } from './events.js';
@@ -91,13 +91,23 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
     return row.white_id === userId || row.black_id === userId || row.created_by === userId;
   }
 
+  /** Started games are open to every signed-in user to watch; open invites stay private. */
+  function canView(row: GameRow, userId: number): boolean {
+    return row.status !== 'waiting' || canSee(row, userId);
+  }
+
   function participants(row: GameRow): number[] {
     return [row.white_id, row.black_id, row.created_by].filter((id): id is number => id != null);
   }
 
+  /** Who hears about changes to a game: everyone once it has started (spectators, the matches list). */
+  function audience(row: GameRow): number[] | '*' {
+    return row.status === 'waiting' ? participants(row) : '*';
+  }
+
   function announce(row: GameRow, action?: GameEvent['action']): Promise<void> {
     const data: GameEvent = { id: row.id, version: row.version, ...(action ? { action } : {}) };
-    return hub.notify(participants(row), 'game', data);
+    return hub.notify(audience(row), 'game', data);
   }
 
   router.use('/api', requireUser);
@@ -148,6 +158,29 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       };
     });
     res.json({ games });
+  });
+
+  // Every started game, for the matches screen where anyone can pick one to watch.
+  router.get('/api/matches', async (_req, res) => {
+    const { rows } = await db.query<GameRow>(
+      `SELECT * FROM games WHERE status IN ('active', 'finished')
+       ORDER BY (status = 'active') DESC, updated_at DESC LIMIT 200`,
+    );
+    const names = await players(rows.flatMap((row) => [row.white_id, row.black_id]));
+    const name = (id: number | null) => (id == null ? null : (names.get(id) ?? null));
+    const matches: MatchSummary[] = rows.map((row) => ({
+      id: row.id,
+      status: row.status as MatchSummary['status'],
+      players: { white: name(row.white_id), black: name(row.black_id) },
+      turn: row.state ? awaiting(row.state) : null,
+      cube: row.state?.cube.value ?? 1,
+      pips: row.state ? { white: pipCount(row.state.board, 'white'), black: pipCount(row.state.board, 'black') } : null,
+      result: row.state?.result
+        ? { winner: row.state.result.winner, points: row.state.result.points, reason: row.state.result.reason }
+        : null,
+      updatedAt: row.updated_at.toISOString(),
+    }));
+    res.json({ matches });
   });
 
   // Everyone this user could challenge, for the lobby's opponent picker. Usernames only, never emails.
@@ -239,7 +272,7 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
 
   router.get('/api/games/:id', async (req, res) => {
     const row = await getRow(db, req.params.id);
-    if (!row || !canSee(row, req.user!.id)) {
+    if (!row || !canView(row, req.user!.id)) {
       res.status(404).json({ error: 'Game not found' });
       return;
     }
@@ -248,7 +281,7 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
 
   router.get('/api/games/:id/history', async (req, res) => {
     const row = await getRow(db, req.params.id);
-    if (!row || !canSee(row, req.user!.id)) {
+    if (!row || !canView(row, req.user!.id)) {
       res.status(404).json({ error: 'Game not found' });
       return;
     }
@@ -284,8 +317,9 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
     const outcome = await db.transaction(async (tx) => {
       // Row lock: two requests for the same game take turns.
       const row = await getRow(tx, req.params.id, true);
-      if (!row || !canSee(row, me.id)) return { status: 404, error: 'Game not found' } as const;
+      if (!row || !canView(row, me.id)) return { status: 404, error: 'Game not found' } as const;
       const color = colorOf(row, me.id);
+      if (!color) return { status: 403, error: "You're watching this game, not playing in it" } as const;
       if (row.status !== 'active' || !row.state || !color) {
         return { status: 409, error: 'This game is not in progress', row } as const;
       }
@@ -356,7 +390,7 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       return;
     }
     const data: MovePreview = { id: row.id, version: row.version, by: color, moves: played };
-    await hub.notify(participants(row), 'preview', data);
+    await hub.notify(audience(row), 'preview', data);
     res.status(204).end();
   });
 

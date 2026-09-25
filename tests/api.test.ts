@@ -288,16 +288,62 @@ describe('games', () => {
     expect((await request(app).get('/api/players')).status).toBe(401);
   });
 
-  it('hides games from players who are not in them', async () => {
+  it('lets other signed-in players watch a started game but not act in it', async () => {
     const { app } = makeApp();
     const alice = await signup(app, 'alice');
     await signup(app, 'bob');
     const eve = await signup(app, 'eve');
     const { body } = await alice.post('/api/games').send({ opponent: 'bob' });
+
+    const watched = await eve.get(`/api/games/${body.game.id}`);
+    expect(watched.status).toBe(200);
+    expect(watched.body.game.you).toBeNull();
+    expect(watched.body.game.inviteCode).toBeNull();
+    expect(watched.body.game.players.white.username).toBe('alice');
+    expect((await eve.get(`/api/games/${body.game.id}/history`)).status).toBe(200);
+
+    const acted = await eve.post(`/api/games/${body.game.id}/actions`).send({ action: { type: 'resign' } });
+    expect(acted.status).toBe(403);
+    expect((await alice.get(`/api/games/${body.game.id}`)).body.game.status).toBe('active');
+    expect((await request(app).get(`/api/games/${body.game.id}`)).status).toBe(401);
+  });
+
+  it('keeps unanswered invites private', async () => {
+    const { app } = makeApp();
+    const alice = await signup(app, 'alice');
+    const eve = await signup(app, 'eve');
+    const { body } = await alice.post('/api/games').send({});
     expect((await eve.get(`/api/games/${body.game.id}`)).status).toBe(404);
-    expect(
-      (await eve.post(`/api/games/${body.game.id}/actions`).send({ action: { type: 'resign' } })).status,
-    ).toBe(404);
+    expect((await eve.get('/api/matches')).body.matches).toEqual([]);
+  });
+
+  it('lists every game in progress or finished on the matches screen', async () => {
+    const { app } = makeApp();
+    const alice = await signup(app, 'alice');
+    const bob = await signup(app, 'bob');
+    await signup(app, 'carol');
+    const eve = await signup(app, 'eve');
+    const g1 = (await alice.post('/api/games').send({ opponent: 'bob' })).body.game;
+    const g2 = (await alice.post('/api/games').send({ opponent: 'carol' })).body.game;
+    await alice.post('/api/games').send({});
+    await bob.post(`/api/games/${g1.id}/actions`).send({ action: { type: 'resign' } });
+
+    const res = await eve.get('/api/matches');
+    expect(res.status).toBe(200);
+    const matches = res.body.matches;
+    expect(matches.map((m: { id: string }) => m.id)).toEqual([g2.id, g1.id]);
+    expect(matches[0]).toMatchObject({
+      status: 'active',
+      players: { white: { username: 'alice' }, black: { username: 'carol' } },
+      result: null,
+      pips: { white: 167, black: 167 },
+    });
+    expect(matches[1]).toMatchObject({
+      status: 'finished',
+      turn: null,
+      result: { winner: 'white', reason: 'resign' },
+    });
+    expect((await request(app).get('/api/matches')).status).toBe(401);
   });
 
   it('starts a game from an invite link', async () => {
@@ -406,5 +452,25 @@ describe('live updates', () => {
 
     await bob.post(`/api/games/${game.id}/actions`).send({ action: { type: 'roll' }, version: moved.body.game.version });
     expect(events().at(-1)?.data.action).toEqual({ type: 'roll', by: 'black' });
+  });
+
+  it('tell spectators when a started game changes, but keep invites to their owner', async () => {
+    const hub = new EventHub();
+    const { app } = makeApp({ hub });
+    const alice = await signup(app, 'alice');
+    await signup(app, 'bob');
+    const eve = await signup(app, 'eve');
+    const eveId = (await eve.get('/api/me')).body.user.id;
+    const written: string[] = [];
+    hub.add(eveId, { write: (chunk: string) => written.push(chunk) } as never);
+
+    await alice.post('/api/games').send({});
+    expect(written).toEqual([]);
+    const { body } = await alice.post('/api/games').send({ opponent: 'bob' });
+    expect(written.join('')).toContain(`"id":"${body.game.id}"`);
+
+    // Opening roll 3-1: alice (white) moves first, and eve sees the checker move before it's confirmed.
+    await alice.post(`/api/games/${body.game.id}/preview`).send({ moves: [{ from: 7, to: 4, die: 3 }], version: body.game.version });
+    expect(written.at(-1)).toMatch(/^event: preview\n/);
   });
 });

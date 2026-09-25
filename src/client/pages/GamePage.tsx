@@ -126,7 +126,10 @@ export function GamePage() {
 
   const state = game?.state ?? null;
   const you = game?.you ?? null;
-  const them = you ? opponent(you) : null;
+  // Spectators see the board from white's side, like a player would.
+  const spectating = Boolean(game && !you);
+  const seat: Color = you ?? 'white';
+  const them = opponent(seat);
   const names = {
     white: game?.players.white?.username ?? 'White',
     black: game?.players.black?.username ?? 'Black',
@@ -238,7 +241,7 @@ export function GamePage() {
   }
   if (!game) return <div className="loading">Loading game…</div>;
 
-  if (game.status === 'waiting' || !state || !you || !them) {
+  if (game.status === 'waiting' || !state) {
     return (
       <>
         <Header />
@@ -262,7 +265,7 @@ export function GamePage() {
   }
 
   const lastTurnIndices = new Set<number>(
-    !myMoving && state.lastTurn && state.lastTurn.color === them
+    !myMoving && state.lastTurn && (spectating || state.lastTurn.color === them)
       ? state.lastTurn.moves.flatMap((m) => [m.from, m.to].filter((s): s is number => typeof s === 'number'))
       : [],
   );
@@ -270,6 +273,8 @@ export function GamePage() {
   let prompt: string;
   if (roll) {
     prompt = roll.color === you ? 'Rolling…' : `${names[roll.color]} is rolling…`;
+  } else if (spectating) {
+    prompt = spectatorPrompt(state, names);
   } else if (state.phase === 'finished' && state.result) {
     const r = state.result;
     const won = r.winner === you;
@@ -300,9 +305,10 @@ export function GamePage() {
   }
 
   const lastTurnText =
-    state.lastTurn && state.lastTurn.color === them && state.phase !== 'finished'
-      ? describeTurn(state.lastTurn, names[them])
+    state.lastTurn && (spectating || state.lastTurn.color === them) && state.phase !== 'finished'
+      ? describeTurn(state.lastTurn, names[state.lastTurn.color])
       : null;
+  const backTo = spectating ? { to: '/matches', label: 'All matches' } : { to: '/', label: 'All games' };
 
   const board = displayBoard!;
 
@@ -322,14 +328,22 @@ export function GamePage() {
       <main className="page game-page">
         <div className="players">
           <PlayerTag name={names[them]} color={them} pips={pipCount(board, them)} active={state.phase !== 'finished' && state.turn === them} />
-          <Link to="/" className="muted small">← All games</Link>
-          <PlayerTag name={`${names[you]} (you)`} color={you} pips={pipCount(board, you)} active={state.phase !== 'finished' && state.turn === you} />
+          <div className="players-middle">
+            {spectating && <span className="badge">Watching</span>}
+            <Link to={backTo.to} className="muted small">← {backTo.label}</Link>
+          </div>
+          <PlayerTag
+            name={spectating ? names[seat] : `${names[seat]} (you)`}
+            color={seat}
+            pips={pipCount(board, seat)}
+            active={state.phase !== 'finished' && state.turn === seat}
+          />
         </div>
 
         <div className="board-wrap">
           <Board
             board={board}
-            you={you}
+            you={seat}
             dice={dice}
             remaining={remaining}
             diceColor={diceColor}
@@ -348,77 +362,101 @@ export function GamePage() {
           <p className="prompt" aria-live="polite">{prompt}</p>
           {lastTurnText && <p className="muted small">{lastTurnText}</p>}
           {error && <p className="error" role="alert">{error}</p>}
-          <div className="buttons">
-            {state.phase === 'rolling' && state.turn === you && (
-              <>
-                <button className="button primary" onClick={() => act({ type: 'roll' })} disabled={busy}>
-                  Roll dice
-                </button>
-                {canDouble(state, you) && (
-                  <button className="button" onClick={() => act({ type: 'double' })} disabled={busy}>
-                    Double to {state.cube.value * 2}
+          {spectating ? null : (
+            <div className="buttons">
+              {state.phase === 'rolling' && state.turn === you && (
+                <>
+                  <button className="button primary" onClick={() => act({ type: 'roll' })} disabled={busy}>
+                    Roll dice
                   </button>
-                )}
-              </>
-            )}
-            {myMoving && (
-              <>
+                  {canDouble(state, seat) && (
+                    <button className="button" onClick={() => act({ type: 'double' })} disabled={busy}>
+                      Double to {state.cube.value * 2}
+                    </button>
+                  )}
+                </>
+              )}
+              {myMoving && (
+                <>
+                  <button
+                    className="button primary"
+                    onClick={() => act({ type: 'move', moves: pending })}
+                    disabled={busy || !turnComplete || Boolean(roll)}
+                  >
+                    Confirm move
+                  </button>
+                  <button
+                    className="button"
+                    onClick={() => {
+                      const next = pending.slice(0, -1);
+                      setPending(next);
+                      setSelected(null);
+                      setMotion(null);
+                      sendPreview(next);
+                    }}
+                    disabled={busy || pending.length === 0}
+                  >
+                    Undo
+                  </button>
+                </>
+              )}
+              {state.phase === 'doubling' && state.doubleOfferedBy === them && (
+                <>
+                  <button className="button primary" onClick={() => act({ type: 'take' })} disabled={busy}>
+                    Take
+                  </button>
+                  <button className="button" onClick={() => act({ type: 'drop' })} disabled={busy}>
+                    Pass
+                  </button>
+                </>
+              )}
+              {state.phase !== 'finished' && (
                 <button
-                  className="button primary"
-                  onClick={() => act({ type: 'move', moves: pending })}
-                  disabled={busy || !turnComplete || Boolean(roll)}
-                >
-                  Confirm move
-                </button>
-                <button
-                  className="button"
+                  className="button ghost danger"
                   onClick={() => {
-                    const next = pending.slice(0, -1);
-                    setPending(next);
-                    setSelected(null);
-                    setMotion(null);
-                    sendPreview(next);
+                    if (window.confirm('Resign this game? Your opponent wins at the current stakes.')) void act({ type: 'resign' });
                   }}
-                  disabled={busy || pending.length === 0}
+                  disabled={busy}
                 >
-                  Undo
+                  Resign
                 </button>
-              </>
-            )}
-            {state.phase === 'doubling' && state.doubleOfferedBy === them && (
-              <>
-                <button className="button primary" onClick={() => act({ type: 'take' })} disabled={busy}>
-                  Take
-                </button>
-                <button className="button" onClick={() => act({ type: 'drop' })} disabled={busy}>
-                  Pass
-                </button>
-              </>
-            )}
-            {state.phase !== 'finished' && (
-              <button
-                className="button ghost danger"
-                onClick={() => {
-                  if (window.confirm('Resign this game? Your opponent wins at the current stakes.')) void act({ type: 'resign' });
-                }}
-                disabled={busy}
-              >
-                Resign
-              </button>
-            )}
-            {state.phase === 'finished' && (
-              <Link className="button primary" to="/">
-                Back to your games
-              </Link>
-            )}
-          </div>
+              )}
+              {state.phase === 'finished' && (
+                <Link className="button primary" to="/">
+                  Back to your games
+                </Link>
+              )}
+            </div>
+          )}
           {myMoving && pending.length > 0 && (
-            <p className="muted small">This turn: {pending.map((m) => notation(you, m)).join(' ')}</p>
+            <p className="muted small">This turn: {pending.map((m) => notation(seat, m)).join(' ')}</p>
           )}
         </div>
       </main>
     </>
   );
+}
+
+/** What's happening, told from the sidelines. */
+function spectatorPrompt(state: NonNullable<GameView['state']>, names: Record<Color, string>): string {
+  if (state.phase === 'finished' && state.result) {
+    const r = state.result;
+    const loser = names[opponent(r.winner)];
+    const how =
+      r.reason === 'resign'
+        ? `${loser} resigned. `
+        : r.reason === 'drop'
+          ? `${loser} passed the double. `
+          : r.type !== 'normal'
+            ? `${r.type === 'gammon' ? 'Gammon' : 'Backgammon'}! `
+            : '';
+    return `${how}${names[r.winner]} won ${r.points} point${r.points === 1 ? '' : 's'}.`;
+  }
+  if (state.phase === 'doubling' && state.doubleOfferedBy) {
+    const offeredTo = opponent(state.doubleOfferedBy);
+    return `${names[state.doubleOfferedBy]} doubles to ${state.cube.value * 2}. Waiting for ${names[offeredTo]} to take or pass.`;
+  }
+  return state.phase === 'rolling' ? `${names[state.turn]} to roll.` : `${names[state.turn]} to move.`;
 }
 
 function PlayerTag({ name, color, pips, active }: { name: string; color: Color; pips: number; active: boolean }) {

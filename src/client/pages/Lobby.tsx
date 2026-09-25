@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { GameSummary, PlayerInfo } from '../../shared/api';
 import { api, inviteUrl } from '../api';
@@ -7,7 +7,7 @@ import { useGameEvents } from '../events';
 import { Header } from '../components/Header';
 import { CopyButton } from '../components/CopyButton';
 
-function timeAgo(isoTime: string): string {
+export function timeAgo(isoTime: string): string {
   const then = new Date(isoTime).getTime();
   const s = Math.max(0, Math.round((Date.now() - then) / 1000));
   if (s < 60) return 'just now';
@@ -40,10 +40,18 @@ export function Lobby() {
     void loadPlayers();
   }, [load, loadPlayers]);
 
+  // Every started game's changes reach every browser now (for spectators), so
+  // batch bursts of them into one refetch.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
   useGameEvents((e) => {
     if (e.kind === 'preview') return;
-    void load();
-    void refresh();
+    if (timer.current) return;
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      void load();
+      void refresh();
+    }, 500);
   });
 
   const yourTurn = games?.filter((g) => g.status === 'active' && g.yourTurn) ?? [];

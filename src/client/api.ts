@@ -1,4 +1,4 @@
-import type { GameSummary, GameView, PlayerInfo } from '../shared/api';
+import type { GameSummary, GameView, MatchSummary, PlayerInfo } from '../shared/api';
 import type { Action, Move } from '../shared/engine';
 
 /**
@@ -86,6 +86,7 @@ export const api = {
 
   players: () => call<{ players: PlayerInfo[] }>('GET', '/api/players'),
   games: () => call<{ games: GameSummary[] }>('GET', '/api/games'),
+  matches: () => call<{ matches: MatchSummary[] }>('GET', '/api/matches'),
   game: (id: string) => call<{ game: GameView }>('GET', `/api/games/${id}`),
   challenge: (opponent: string) => call<{ game: GameView }>('POST', '/api/games', { opponent }),
   createInvite: () => call<{ game: GameView }>('POST', '/api/games', {}),
