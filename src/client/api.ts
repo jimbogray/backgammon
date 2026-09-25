@@ -1,5 +1,5 @@
-import type { GameSummary, GameView, PlayerInfo } from '../shared/api';
-import type { Action } from '../shared/engine';
+import type { GameSummary, GameView, MatchSummary, PlayerInfo } from '../shared/api';
+import type { Action, Move } from '../shared/engine';
 
 /**
  * Where the API lives. Empty in development, where Vite proxies /api to the
@@ -86,6 +86,7 @@ export const api = {
 
   players: () => call<{ players: PlayerInfo[] }>('GET', '/api/players'),
   games: () => call<{ games: GameSummary[] }>('GET', '/api/games'),
+  matches: () => call<{ matches: MatchSummary[] }>('GET', '/api/matches'),
   game: (id: string) => call<{ game: GameView }>('GET', `/api/games/${id}`),
   challenge: (opponent: string) => call<{ game: GameView }>('POST', '/api/games', { opponent }),
   createInvite: () => call<{ game: GameView }>('POST', '/api/games', {}),
@@ -95,6 +96,8 @@ export const api = {
   joinInvite: (code: string) => call<{ game: GameView }>('POST', `/api/invites/${code}/join`, {}),
   act: (id: string, action: Action, version: number) =>
     call<{ game: GameView }>('POST', `/api/games/${id}/actions`, { action, version }),
+  preview: (id: string, moves: Move[], version: number) =>
+    call<Record<string, never>>('POST', `/api/games/${id}/preview`, { moves, version }),
 };
 
 export function googleSignInUrl(next: string): string {

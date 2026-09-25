@@ -6,6 +6,7 @@ import { GamePage } from './pages/GamePage';
 import { GoogleComplete } from './pages/GoogleComplete';
 import { JoinPage } from './pages/JoinPage';
 import { Lobby } from './pages/Lobby';
+import { MatchesPage } from './pages/MatchesPage';
 import './styles.css';
 
 function NotFound() {
@@ -23,6 +24,7 @@ createRoot(document.getElementById('root')!).render(
       <AuthProvider>
         <Routes>
           <Route path="/" element={<RequireAuth><Lobby /></RequireAuth>} />
+          <Route path="/matches" element={<RequireAuth><MatchesPage /></RequireAuth>} />
           <Route path="/game/:id" element={<RequireAuth><GamePage /></RequireAuth>} />
           <Route path="/join/:code" element={<RequireAuth><JoinPage /></RequireAuth>} />
           <Route path="/auth/complete" element={<GoogleComplete />} />

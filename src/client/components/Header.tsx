@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 
@@ -26,6 +26,14 @@ export function Header() {
       <Link to="/" className="brand">
         Backgammon
       </Link>
+      {me && (
+        <nav className="nav">
+          <NavLink to="/" end>
+            Your games
+          </NavLink>
+          <NavLink to="/matches">Matches</NavLink>
+        </nav>
+      )}
       {me && (
         <div className="account">
           {editing ? (

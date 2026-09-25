@@ -1,5 +1,5 @@
 // Shapes of the JSON the server returns, shared with the browser client.
-import type { Color, EndReason, GameState } from './engine.js';
+import type { Action, Color, EndReason, GameState, Move } from './engine.js';
 
 export interface PlayerInfo {
   id: number;
@@ -28,5 +28,35 @@ export interface GameSummary {
   yourTurn: boolean;
   inviteCode: string | null;
   result: { won: boolean; points: number; reason: EndReason } | null;
+  updatedAt: string;
+}
+
+/** Live notice that a game changed; browsers refetch the game when they get one. */
+export interface GameEvent {
+  id: string;
+  version: number;
+  /** What changed it, when a player acted (absent when a game starts). */
+  action?: { type: Action['type']; by: Color };
+}
+
+/** Live notice of the checkers a player has moved so far in a turn they haven't confirmed yet. */
+export interface MovePreview {
+  id: string;
+  /** The game version the moves were made from. */
+  version: number;
+  by: Color;
+  moves: Move[];
+}
+
+/** A started game as listed on the matches screen, for anyone to watch. */
+export interface MatchSummary {
+  id: string;
+  status: 'active' | 'finished';
+  players: { white: PlayerInfo | null; black: PlayerInfo | null };
+  /** Who the game is waiting on, or null once it's over. */
+  turn: Color | null;
+  cube: number;
+  pips: { white: number; black: number } | null;
+  result: { winner: Color; points: number; reason: EndReason } | null;
   updatedAt: string;
 }

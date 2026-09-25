@@ -1,8 +1,16 @@
 import type React from 'react';
-import type { Board as BoardState, Color } from '../../shared/engine';
+import type { Board as BoardState, Color, Move } from '../../shared/engine';
 import { countAt, opponent } from '../../shared/engine';
 
 export type Spot = number | 'bar' | 'off';
+
+/** A checker move to animate: the checker glides from `move.from` to where it now sits. */
+export interface Motion {
+  move: Move;
+  color: Color;
+  /** Changes for every new move, so the animation replays. */
+  key: string;
+}
 
 interface Props {
   board: BoardState;
@@ -11,6 +19,9 @@ interface Props {
   /** Dice values still unused this turn (for dimming used dice). */
   remaining: number[] | null;
   diceColor: Color;
+  /** Shake the dice while a roll is under way. */
+  rolling?: boolean;
+  motion?: Motion | null;
   cube: { value: number; owner: Color | null };
   selected: Spot | null;
   sources: Set<Spot>;
@@ -46,9 +57,29 @@ function pointLeft(p: number): number {
   return RIGHT_X + (p - 19) * PW;
 }
 
-function Checker({ cx, cy, color, label, ring }: { cx: number; cy: number; color: Color; label?: string; ring?: 'source' | 'selected' }) {
+/** Centre of the `i`th checker (from the edge) in a stack on a point or the bar, as seen by `you`. */
+function stackXY(you: Color, color: Color, spot: number | 'bar', i: number): { x: number; y: number } {
+  if (spot === 'bar') {
+    const k = Math.min(i, 2);
+    return { x: BAR_X + BAR_W / 2, y: color === you ? H / 2 + 30 + R + k * 2 * R : H / 2 - 30 - R - k * 2 * R };
+  }
+  const p = toViewerPoint(you, spot);
+  const k = Math.min(i, 4);
+  return { x: pointLeft(p) + PW / 2, y: p >= 13 ? TOP + R + k * 2 * R : BOTTOM - R - k * 2 * R };
+}
+
+function countOn(board: BoardState, color: Color, spot: number | 'bar'): number {
+  return spot === 'bar' ? board.bar[color] : countAt(board, color, spot);
+}
+
+type Glide = { dx: number; dy: number; key: string };
+
+function Checker({ cx, cy, color, label, ring, glide }: { cx: number; cy: number; color: Color; label?: string; ring?: 'source' | 'selected'; glide?: Glide }) {
   return (
-    <g className={`checker ${color}`}>
+    <g
+      className={`checker ${color} ${glide ? 'gliding' : ''}`}
+      style={glide ? ({ '--dx': `${glide.dx}px`, '--dy': `${glide.dy}px` } as React.CSSProperties) : undefined}
+    >
       {ring && <circle cx={cx} cy={cy} r={R + 3} className={`ring ${ring}`} />}
       <circle cx={cx} cy={cy} r={R - 1} className="body" />
       <circle cx={cx} cy={cy} r={R - 8} className="inner" />
@@ -70,9 +101,9 @@ const PIPS: Record<number, Array<[number, number]>> = {
   6: [[0.25, 0.25], [0.75, 0.25], [0.25, 0.5], [0.75, 0.5], [0.25, 0.75], [0.75, 0.75]],
 };
 
-function Die({ x, y, size, value, color, used }: { x: number; y: number; size: number; value: number; color: Color; used: boolean }) {
+function Die({ x, y, size, value, color, used, rolling }: { x: number; y: number; size: number; value: number; color: Color; used: boolean; rolling?: boolean }) {
   return (
-    <g className={`die ${color} ${used ? 'used' : ''}`}>
+    <g className={`die ${color} ${used ? 'used' : ''} ${rolling ? 'rolling' : ''}`} style={{ transformOrigin: `${x + size / 2}px ${y + size / 2}px` }}>
       <rect x={x} y={y} width={size} height={size} rx={size * 0.18} />
       {PIPS[value].map(([px, py], i) => (
         <circle key={i} cx={x + px * size} cy={y + py * size} r={size * 0.09} />
@@ -81,8 +112,21 @@ function Die({ x, y, size, value, color, used }: { x: number; y: number; size: n
   );
 }
 
-export function Board({ board, you, dice, remaining, diceColor, cube, selected, sources, targets, recent, onSpotClick }: Props) {
+export function Board({ board, you, dice, remaining, diceColor, rolling, motion, cube, selected, sources, targets, recent, onSpotClick }: Props) {
   const them = opponent(you);
+
+  // The checker that just moved starts at its old spot and glides to the top of its new stack.
+  let glideTo: { spot: number | 'bar'; glide: Glide } | null = null;
+  if (motion && motion.move.to !== 'off') {
+    const { move, color } = motion;
+    const to = move.to as number;
+    const toCount = countAt(board, color, to);
+    if (toCount > 0) {
+      const src = stackXY(you, color, move.from, countOn(board, color, move.from));
+      const dst = stackXY(you, color, to, toCount - 1);
+      glideTo = { spot: to, glide: { dx: src.x - dst.x, dy: src.y - dst.y, key: motion.key } };
+    }
+  }
   const points = [];
   const checkers = [];
   const hits = [];
@@ -113,12 +157,14 @@ export function Board({ board, you, dice, remaining, diceColor, cube, selected, 
     for (let i = 0; i < visible; i++) {
       const cy = top ? TOP + R + i * 2 * R : BOTTOM - R - i * 2 * R;
       const isTop = i === visible - 1;
+      const glide = isTop && glideTo?.spot === index && owner === motion?.color ? glideTo.glide : undefined;
       checkers.push(
         <Checker
-          key={`c${index}-${i}`}
+          key={glide ? `c${index}-${i}-${glide.key}` : `c${index}-${i}`}
           cx={x + PW / 2}
           cy={cy}
           color={owner!}
+          glide={glide}
           label={isTop && n > 5 ? String(n) : undefined}
           ring={isTop ? (selected === index ? 'selected' : sources.has(index) ? 'source' : undefined) : undefined}
         />,
@@ -199,7 +245,16 @@ export function Board({ board, you, dice, remaining, diceColor, cube, selected, 
     const startX = diceColor === you ? RIGHT_X + (6 * PW - total) / 2 : F + (6 * PW - total) / 2;
     values.forEach((v, i) =>
       diceEls.push(
-        <Die key={`d${i}`} x={startX + i * (size + gap)} y={H / 2 - size / 2} size={size} value={v} color={diceColor} used={usedFlags[i]} />,
+        <Die
+          key={`d${i}`}
+          x={startX + i * (size + gap)}
+          y={H / 2 - size / 2}
+          size={size}
+          value={v}
+          color={diceColor}
+          used={usedFlags[i]}
+          rolling={rolling}
+        />,
       ),
     );
   }

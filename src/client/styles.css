@@ -88,6 +88,7 @@ a {
 /* Layout */
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
@@ -99,6 +100,20 @@ a {
   font-weight: 700;
   text-decoration: none;
   font-size: 1.1rem;
+}
+.nav {
+  display: flex;
+  gap: 1rem;
+  margin-right: auto;
+}
+.nav a {
+  text-decoration: none;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.nav a.active {
+  color: var(--text);
+  font-weight: 600;
 }
 .account {
   display: flex;
@@ -364,7 +379,44 @@ a.game-row:hover {
   border: 2px solid #777;
 }
 
+/* Matches */
+.page-title {
+  margin: 0;
+  font-size: 1.4rem;
+}
+.match-players {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.match-player {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.match-player.strong {
+  font-weight: 600;
+}
+
 /* Game */
+.players-middle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+}
+.badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--highlight);
+  color: var(--text);
+  border: 1px solid var(--focus);
+}
 .players {
   display: flex;
   justify-content: space-between;
@@ -525,6 +577,37 @@ a.game-row:hover {
 .board .die.used {
   opacity: 0.35;
 }
+.board .die.rolling {
+  animation: die-tumble 0.18s ease-in-out infinite alternate;
+}
+.board .die.rolling:nth-of-type(even) {
+  animation-direction: alternate-reverse;
+}
+@keyframes die-tumble {
+  from {
+    transform: rotate(-14deg) translateY(-4px);
+  }
+  to {
+    transform: rotate(14deg) translateY(4px);
+  }
+}
+.board .checker.gliding {
+  animation: checker-glide 0.35s ease-out;
+}
+@keyframes checker-glide {
+  from {
+    transform: translate(var(--dx), var(--dy));
+  }
+  to {
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .board .die.rolling,
+  .board .checker.gliding {
+    animation: none;
+  }
+}
 .board .hit {
   fill: transparent;
 }
@@ -541,5 +624,12 @@ a.game-row:hover {
   }
   .players {
     padding: 0 0.25rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .nav {
+    order: 3;
+    width: 100%;
   }
 }
