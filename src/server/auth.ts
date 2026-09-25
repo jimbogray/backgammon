@@ -109,19 +109,21 @@ export interface GoogleProfile {
   name?: string;
 }
 
-/** Find or create the account for a Google profile, linking by verified email. */
+/**
+ * A Google sign-in whose email already belongs to a password account. Sign-up
+ * doesn't verify email addresses, so that account may not be the email's owner,
+ * and linking the two would let whoever registered it into the Google user's account.
+ */
+export class EmailInUseError extends Error {}
+
+/** Find or create the account for a Google profile. */
 export async function upsertGoogleUser(db: Database, profile: GoogleProfile): Promise<User> {
   return db.transaction(async (tx) => {
     const bySub = await tx.query<User>('SELECT id, username, email FROM users WHERE google_sub = $1', [profile.sub]);
     if (bySub.rows[0]) return bySub.rows[0];
-    if (profile.email && profile.email_verified) {
-      const byEmail = await tx.query<User>('SELECT id, username, email FROM users WHERE lower(email) = lower($1)', [
-        profile.email,
-      ]);
-      if (byEmail.rows[0]) {
-        await tx.query('UPDATE users SET google_sub = $1 WHERE id = $2', [profile.sub, byEmail.rows[0].id]);
-        return byEmail.rows[0];
-      }
+    if (profile.email) {
+      const byEmail = await tx.query('SELECT 1 FROM users WHERE lower(email) = lower($1)', [profile.email]);
+      if (byEmail.rows.length) throw new EmailInUseError();
     }
     const email = profile.email && profile.email_verified ? profile.email : null;
     const username = await uniqueUsername(tx, profile.name ?? profile.email?.split('@')[0] ?? 'player');
@@ -256,6 +258,7 @@ export function authRouter({ db, config, fetch: fetchImpl = fetch }: AuthDeps): 
   // one-time code that the app swaps for a session token.
   const redirectUri = `${config.apiUrl}/api/auth/google/callback`;
   const failed = `${config.appUrl}/?error=google`;
+  const emailInUse = `${config.appUrl}/?error=google-email`;
 
   router.get('/api/auth/google', (req, res) => {
     if (!config.google) {
@@ -328,6 +331,10 @@ export function authRouter({ db, config, fetch: fetchImpl = fetch }: AuthDeps): 
       const params = new URLSearchParams({ code: loginCode, next: safeNext(saved.next) });
       res.redirect(`${config.appUrl}/auth/complete#${params}`);
     } catch (err) {
+      if (err instanceof EmailInUseError) {
+        res.redirect(emailInUse);
+        return;
+      }
       console.error('Google sign-in failed:', err);
       res.redirect(failed);
     }

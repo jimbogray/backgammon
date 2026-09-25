@@ -1,6 +1,6 @@
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
-import { connectPostgres, migrate } from './db.js';
+import { connectPostgres, Database, ensureEntraRole, grantAppAccess, migrate } from './db.js';
 import { EventHub } from './events.js';
 
 // Load settings from a .env file when one exists (see .env.example).
@@ -13,8 +13,18 @@ try {
 const EVENTS_CHANNEL = 'game_events';
 
 const config = loadConfig();
-const db = await connectPostgres(config.databaseUrl, config.databaseAuth);
-await migrate(db);
+const admin = await connectPostgres(config.databaseUrl, config.databaseAuth);
+await migrate(admin);
+
+let db: Database = admin;
+const role = config.databaseAppRole;
+if (role) {
+  // Set up the limited role, then serve requests as it and let go of the admin connection.
+  await ensureEntraRole(config.databaseUrl, role.user, role.objectId);
+  await grantAppAccess(admin, role.user);
+  db = await connectPostgres(config.databaseUrl, config.databaseAuth, { user: role.user, clientId: role.clientId });
+  await admin.close();
+}
 
 // Live updates travel through Postgres so every API replica hears about every move.
 const hub = new EventHub(async (message) => {

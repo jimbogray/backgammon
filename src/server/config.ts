@@ -11,6 +11,12 @@ export interface Config {
   databaseUrl: string;
   /** `entra` signs in to Azure Database for PostgreSQL with a managed identity token instead of a password. */
   databaseAuth: DatabaseAuth;
+  /**
+   * With Microsoft Entra database auth: a second managed identity that serves
+   * requests with read/write access to the app's tables only. The identity in
+   * DATABASE_URL then just creates the database, runs migrations and grants access.
+   */
+  databaseAppRole: { user: string; clientId: string; objectId: string } | null;
   isProduction: boolean;
   google: { clientId: string; clientSecret: string } | null;
 }
@@ -45,10 +51,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error('DATABASE_AUTH must be "password" or "entra"');
   }
 
+  let databaseAppRole: Config['databaseAppRole'] = null;
+  if (env.DATABASE_APP_USER) {
+    if (databaseAuth !== 'entra' || !env.DATABASE_APP_CLIENT_ID || !env.DATABASE_APP_OBJECT_ID) {
+      throw new Error('DATABASE_APP_USER needs DATABASE_AUTH=entra, DATABASE_APP_CLIENT_ID and DATABASE_APP_OBJECT_ID');
+    }
+    databaseAppRole = {
+      user: env.DATABASE_APP_USER,
+      clientId: env.DATABASE_APP_CLIENT_ID,
+      objectId: env.DATABASE_APP_OBJECT_ID,
+    };
+  }
+
   const corsOrigins = (env.CORS_ORIGINS ?? appUrl)
     .split(',')
     .map((origin) => trimSlash(origin.trim()))
     .filter(Boolean);
 
-  return { port, appUrl, apiUrl, corsOrigins, databaseUrl, databaseAuth, isProduction, google };
+  return { port, appUrl, apiUrl, corsOrigins, databaseUrl, databaseAuth, databaseAppRole, isProduction, google };
 }

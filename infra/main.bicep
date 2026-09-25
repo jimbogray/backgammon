@@ -5,8 +5,11 @@
 //   Browser ──► Static Web App (React build)
 //      └──────► Container App (Express API) ──► Postgres Flexible Server
 //
-// The API signs in to Postgres with its managed identity (Microsoft Entra auth;
-// password sign-in is off), so there is no database password anywhere.
+// The API signs in to Postgres with managed identities (Microsoft Entra auth;
+// password sign-in is off), so there is no database password anywhere. It
+// starts up as the server's administrator to create the database and run
+// migrations, then serves requests as a second identity that can only read and
+// write the app's tables.
 
 @description('Environment name, matching bootstrap.bicep.')
 param environmentName string = 'staging'
@@ -40,6 +43,7 @@ var suffix = uniqueString(resourceGroup().id)
 var names = {
   registry: 'backgammon${suffix}'
   apiIdentity: 'id-backgammon-${environmentName}-api'
+  apiDbIdentity: 'id-backgammon-${environmentName}-api-db'
   logs: 'log-backgammon-${environmentName}'
   postgres: 'psql-backgammon-${environmentName}-${take(suffix, 6)}'
   containerEnv: 'cae-backgammon-${environmentName}'
@@ -60,6 +64,14 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing =
 
 resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: names.apiIdentity
+}
+
+// The identity the API serves requests as. The API gives it a Postgres role
+// with read/write access to the app's tables on startup.
+resource apiDbIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: names.apiDbIdentity
+  location: location
+  tags: tags
 }
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -170,6 +182,10 @@ var baseEnv = [
   { name: 'DATABASE_AUTH', value: 'entra' }
   // Which managed identity DefaultAzureCredential should use.
   { name: 'AZURE_CLIENT_ID', value: apiIdentity.properties.clientId }
+  // The limited identity requests are served as.
+  { name: 'DATABASE_APP_USER', value: apiDbIdentity.name }
+  { name: 'DATABASE_APP_CLIENT_ID', value: apiDbIdentity.properties.clientId }
+  { name: 'DATABASE_APP_OBJECT_ID', value: apiDbIdentity.properties.principalId }
 ]
 var googleEnv = googleEnabled
   ? [
@@ -186,6 +202,7 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
     type: 'UserAssigned'
     userAssignedIdentities: {
       '${apiIdentity.id}': {}
+      '${apiDbIdentity.id}': {}
     }
   }
   properties: {

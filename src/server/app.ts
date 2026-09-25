@@ -5,6 +5,7 @@ import type { Config } from './config.js';
 import type { Database } from './db.js';
 import { EventHub } from './events.js';
 import { gamesRouter } from './games.js';
+import { rateLimits } from './limits.js';
 import type { Roller } from '../shared/engine.js';
 
 export interface AppOptions {
@@ -48,7 +49,12 @@ export function createApp({ db, config, hub = new EventHub(), roll, fetch }: App
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true, version: process.env.APP_VERSION ?? 'dev' });
   });
+  const limits = rateLimits();
+  app.use('/api/auth/login', limits.loginPerIp, limits.loginPerAccount);
+  app.use('/api/auth/signup', limits.signup);
+  app.use('/api/auth/google/exchange', limits.googleExchange);
   app.use(sessionMiddleware(db));
+  app.use('/api', limits.api);
   app.use(authRouter({ db, config, fetch }));
   app.use(gamesRouter({ db, hub, roll }));
 
