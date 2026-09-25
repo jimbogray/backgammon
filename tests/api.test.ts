@@ -359,4 +359,52 @@ describe('live updates', () => {
     await expect.poll(() => written.join('')).toContain(`"id":"${body.game.id}"`);
     expect(written[0]).toMatch(/^event: game\n/);
   });
+
+  it('tell both players who rolled and which checkers are moving before the turn is confirmed', async () => {
+    const hub = new EventHub();
+    const { app } = makeApp({ hub });
+    const alice = await signup(app, 'alice');
+    const bob = await signup(app, 'bob');
+    const bobId = (await bob.get('/api/me')).body.user.id;
+    const written: string[] = [];
+    hub.add(bobId, { write: (chunk: string) => written.push(chunk) } as never);
+    const events = () =>
+      written.map((chunk) => {
+        const [, event, data] = /^event: (.*)\ndata: (.*)\n\n$/.exec(chunk)!;
+        return { event, data: JSON.parse(data) };
+      });
+
+    // Opening roll 3-1: alice (white) moves first.
+    const game: GameView = (await alice.post('/api/games').send({ opponent: 'bob' })).body.game;
+    const first = { from: 7, to: 4, die: 3 };
+
+    const preview = await alice.post(`/api/games/${game.id}/preview`).send({ moves: [first], version: game.version });
+    expect(preview.status).toBe(204);
+    expect(events().at(-1)).toEqual({
+      event: 'preview',
+      data: { id: game.id, version: game.version, by: 'white', moves: [first] },
+    });
+
+    // Previews are checked like real moves, and only the player on turn can send them.
+    const illegal = await alice.post(`/api/games/${game.id}/preview`).send({ moves: [{ from: 7, to: 1, die: 6 }], version: game.version });
+    expect(illegal.status).toBe(400);
+    const notYours = await bob.post(`/api/games/${game.id}/preview`).send({ moves: [], version: game.version });
+    expect(notYours.status).toBe(409);
+    const stale = await alice.post(`/api/games/${game.id}/preview`).send({ moves: [], version: game.version - 1 });
+    expect(stale.status).toBe(409);
+    // Nothing is saved by a preview.
+    expect((await alice.get(`/api/games/${game.id}`)).body.game.state.board).toEqual(game.state!.board);
+
+    const moved = await alice.post(`/api/games/${game.id}/actions`).send({
+      action: { type: 'move', moves: [first, { from: 5, to: 4, die: 1 }] },
+      version: game.version,
+    });
+    expect(events().at(-1)).toEqual({
+      event: 'game',
+      data: { id: game.id, version: moved.body.game.version, action: { type: 'move', by: 'white' } },
+    });
+
+    await bob.post(`/api/games/${game.id}/actions`).send({ action: { type: 'roll' }, version: moved.body.game.version });
+    expect(events().at(-1)?.data.action).toEqual({ type: 'roll', by: 'black' });
+  });
 });

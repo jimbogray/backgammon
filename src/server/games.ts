@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { Action, applyAction, Color, GameError, GameState, newGame, Roller } from '../shared/engine.js';
-import type { GameSummary, GameView, PlayerInfo } from '../shared/api.js';
+import { Action, applyAction, Color, GameError, GameState, Move, newGame, replayTurn, Roller } from '../shared/engine.js';
+import type { GameEvent, GameSummary, GameView, MovePreview, PlayerInfo } from '../shared/api.js';
 import { requireUser, User } from './auth.js';
 import type { Database, Queryable } from './db.js';
 import type { EventHub } from './events.js';
@@ -95,8 +95,9 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
     return [row.white_id, row.black_id, row.created_by].filter((id): id is number => id != null);
   }
 
-  function announce(row: GameRow): Promise<void> {
-    return hub.notify(participants(row), 'game', { id: row.id, version: row.version });
+  function announce(row: GameRow, action?: GameEvent['action']): Promise<void> {
+    const data: GameEvent = { id: row.id, version: row.version, ...(action ? { action } : {}) };
+    return hub.notify(participants(row), 'game', data);
   }
 
   router.use('/api', requireUser);
@@ -321,8 +322,42 @@ export function gamesRouter({ db, hub, roll = secureRoll }: GameDeps): Router {
       res.status(outcome.status!).json(body);
       return;
     }
-    await announce(outcome.row);
+    await announce(outcome.row, { type: action.type, by: colorOf(outcome.row, me.id)! });
     res.json({ game: await view(outcome.row, me.id) });
+  });
+
+  // Checkers moved so far in a turn that isn't confirmed yet, so the other
+  // screens watching the game can show them as they happen. Nothing is saved:
+  // the turn still counts only once it's sent to /actions.
+  router.post('/api/games/:id/preview', async (req, res) => {
+    const me = req.user!;
+    const moves = req.body?.moves as Move[] | undefined;
+    const version = Number(req.body?.version);
+    if (!Array.isArray(moves) || moves.length > 4 || !Number.isFinite(version)) {
+      res.status(400).json({ error: 'Send the moves made so far and the game version' });
+      return;
+    }
+    const row = await getRow(db, req.params.id);
+    if (!row || !canSee(row, me.id)) {
+      res.status(404).json({ error: 'Game not found' });
+      return;
+    }
+    const color = colorOf(row, me.id);
+    const state = row.state;
+    if (row.version !== version || !state || state.phase !== 'moving' || state.turn !== color || !state.dice) {
+      res.status(409).json({ error: 'It is not your turn to move' });
+      return;
+    }
+    let played: Move[];
+    try {
+      played = replayTurn(state.board, color, state.dice, moves).played;
+    } catch {
+      res.status(400).json({ error: 'Illegal move' });
+      return;
+    }
+    const data: MovePreview = { id: row.id, version: row.version, by: color, moves: played };
+    await hub.notify(participants(row), 'preview', data);
+    res.status(204).end();
   });
 
   return router;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { GameView } from '../../shared/api';
+import type { GameView, MovePreview } from '../../shared/api';
 import {
   Action,
   availableMoves,
@@ -13,7 +13,7 @@ import {
   TurnRecord,
 } from '../../shared/engine';
 import { api, ApiError, inviteUrl } from '../api';
-import { Board, Spot } from '../components/Board';
+import { Board, Motion, Spot } from '../components/Board';
 import { CopyButton } from '../components/CopyButton';
 import { Header } from '../components/Header';
 import { useGameEvents } from '../events';
@@ -31,6 +31,42 @@ function describeTurn(turn: TurnRecord, name: string): string {
   return `${name} rolled ${roll}: ${turn.moves.map((m) => notation(turn.color, m)).join(' ')}`;
 }
 
+/** How long the dice tumble before showing what was rolled. */
+const ROLL_MS = 900;
+
+function randomFaces(): number[] {
+  return [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
+}
+
+/**
+ * Tumbling dice shown while a roll is under way, on the roller's screen and
+ * on every other screen watching the game.
+ */
+function useRollAnimation() {
+  const [roll, setRoll] = useState<{ color: Color; faces: number[] } | null>(null);
+  const timers = useRef<{ tick?: ReturnType<typeof setInterval>; end?: ReturnType<typeof setTimeout> }>({});
+
+  const stop = useCallback(() => {
+    clearInterval(timers.current.tick);
+    clearTimeout(timers.current.end);
+    timers.current = {};
+    setRoll(null);
+  }, []);
+
+  const start = useCallback(
+    (color: Color) => {
+      if (timers.current.end) return; // already rolling
+      setRoll({ color, faces: randomFaces() });
+      timers.current.tick = setInterval(() => setRoll({ color, faces: randomFaces() }), 90);
+      timers.current.end = setTimeout(stop, ROLL_MS);
+    },
+    [stop],
+  );
+
+  useEffect(() => stop, [stop]);
+  return { roll, start, stop };
+}
+
 export function GamePage() {
   const { id = '' } = useParams();
   const [game, setGame] = useState<GameView | null>(null);
@@ -38,6 +74,10 @@ export function GamePage() {
   const [pending, setPending] = useState<Move[]>([]);
   const [selected, setSelected] = useState<Spot | null>(null);
   const [busy, setBusy] = useState(false);
+  // The other player's moves in a turn they haven't confirmed yet.
+  const [remote, setRemote] = useState<MovePreview | null>(null);
+  const [motion, setMotion] = useState<Motion | null>(null);
+  const { roll, start: startRoll, stop: stopRoll } = useRollAnimation();
 
   const versionRef = useRef<number | null>(null);
   useEffect(() => {
@@ -51,6 +91,7 @@ export function GamePage() {
       if (versionRef.current !== game.version) {
         setPending([]);
         setSelected(null);
+        setMotion(null);
       }
       setGame(game);
     } catch (err) {
@@ -63,7 +104,24 @@ export function GamePage() {
   }, [load]);
 
   useGameEvents((e) => {
-    if (e.id === id || e.id === '*') void load();
+    if (e.kind === 'resync') {
+      void load();
+      return;
+    }
+    if (e.id !== id) return;
+    if (e.kind === 'preview') {
+      if (e.by === game?.you) return; // this player's own moves, from another of their tabs
+      const before = remote?.version === e.version ? remote.moves.length : 0;
+      setRemote(e);
+      setMotion(
+        e.moves.length > before
+          ? { move: e.moves[e.moves.length - 1], color: e.by, key: `r${e.version}-${e.moves.length}` }
+          : null,
+      );
+      return;
+    }
+    if (e.action?.type === 'roll') startRoll(e.action.by);
+    void load();
   });
 
   const state = game?.state ?? null;
@@ -83,9 +141,20 @@ export function GamePage() {
     }
   }, [state, you, pending]);
 
+  // The board as the other player has it partway through their turn.
+  const remoteProgress = useMemo(() => {
+    if (!state || !game || !remote || state.phase !== 'moving' || state.turn === you) return null;
+    if (remote.version !== game.version || remote.by !== state.turn) return null;
+    try {
+      return availableMoves(state, remote.by, remote.moves).progress;
+    } catch {
+      return null;
+    }
+  }, [state, game, remote, you]);
+
   const legal = turnInfo?.legal ?? [];
   const myMoving = Boolean(state && you && state.phase === 'moving' && state.turn === you);
-  const displayBoard = myMoving && turnInfo ? turnInfo.progress.board : state?.board;
+  const displayBoard = myMoving && turnInfo ? turnInfo.progress.board : (remoteProgress?.board ?? state?.board);
   const turnComplete = myMoving && legal.length === 0;
 
   useEffect(() => {
@@ -99,16 +168,22 @@ export function GamePage() {
     };
   }, [state, you]);
 
+  function sendPreview(moves: Move[]) {
+    if (game) api.preview(game.id, moves, game.version).catch(() => {});
+  }
+
   async function act(action: Action) {
     if (!game) return;
     setBusy(true);
     setError('');
+    if (action.type === 'roll' && you) startRoll(you);
     try {
       const { game: next } = await api.act(game.id, action, game.version);
       setGame(next);
       setPending([]);
       setSelected(null);
     } catch (err) {
+      if (action.type === 'roll') stopRoll();
       setError((err as Error).message);
       if (err instanceof ApiError && err.body.game) {
         setGame(err.body.game as GameView);
@@ -120,13 +195,13 @@ export function GamePage() {
     }
   }
 
-  const sources = new Set<Spot>(myMoving ? legal.map((m) => m.from) : []);
+  const sources = new Set<Spot>(myMoving && !roll ? legal.map((m) => m.from) : []);
   const targets = new Set<Spot>(
     myMoving && selected !== null ? legal.filter((m) => m.from === selected).map((m) => m.to) : [],
   );
 
   function onSpotClick(spot: Spot) {
-    if (!myMoving || busy) return;
+    if (!myMoving || busy || roll) return;
     if (selected !== null && targets.has(spot)) {
       // Prefer the smallest die that makes this move (keeps larger dice for bearing off).
       const move = legal
@@ -134,6 +209,8 @@ export function GamePage() {
         .sort((a, b) => a.die - b.die)[0];
       const next = [...pending, move];
       setPending(next);
+      setMotion({ move, color: you!, key: `l${game!.version}-${next.length}` });
+      sendPreview(next);
       // Keep the same checker selected if it can keep moving.
       try {
         const after = availableMoves(state!, you!, next);
@@ -191,7 +268,9 @@ export function GamePage() {
   );
 
   let prompt: string;
-  if (state.phase === 'finished' && state.result) {
+  if (roll) {
+    prompt = roll.color === you ? 'Rolling…' : `${names[roll.color]} is rolling…`;
+  } else if (state.phase === 'finished' && state.result) {
     const r = state.result;
     const won = r.winner === you;
     const how =
@@ -227,6 +306,16 @@ export function GamePage() {
 
   const board = displayBoard!;
 
+  // Dice: tumbling during a roll, else this turn's roll, else a roll that couldn't be played.
+  const unplayable = !state.dice && state.phase === 'rolling' && state.lastTurn?.moves.length === 0 ? state.lastTurn : null;
+  const dice = roll ? roll.faces : (state.dice ?? unplayable?.dice ?? null);
+  const diceColor = roll ? roll.color : unplayable && !state.dice ? unplayable.color : state.turn;
+  const remaining = roll
+    ? null
+    : myMoving
+      ? (turnInfo?.progress.remaining ?? null)
+      : (remoteProgress?.remaining ?? (unplayable && !state.dice ? [] : null));
+
   return (
     <>
       <Header />
@@ -241,9 +330,11 @@ export function GamePage() {
           <Board
             board={board}
             you={you}
-            dice={state.dice}
-            remaining={myMoving ? (turnInfo?.progress.remaining ?? null) : null}
-            diceColor={state.turn}
+            dice={dice}
+            remaining={remaining}
+            diceColor={diceColor}
+            rolling={Boolean(roll)}
+            motion={motion}
             cube={state.cube}
             selected={selected}
             sources={sources}
@@ -275,15 +366,18 @@ export function GamePage() {
                 <button
                   className="button primary"
                   onClick={() => act({ type: 'move', moves: pending })}
-                  disabled={busy || !turnComplete}
+                  disabled={busy || !turnComplete || Boolean(roll)}
                 >
                   Confirm move
                 </button>
                 <button
                   className="button"
                   onClick={() => {
-                    setPending(pending.slice(0, -1));
+                    const next = pending.slice(0, -1);
+                    setPending(next);
                     setSelected(null);
+                    setMotion(null);
+                    sendPreview(next);
                   }}
                   disabled={busy || pending.length === 0}
                 >

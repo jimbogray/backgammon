@@ -40,7 +40,8 @@ export function Lobby() {
     void loadPlayers();
   }, [load, loadPlayers]);
 
-  useGameEvents(() => {
+  useGameEvents((e) => {
+    if (e.kind === 'preview') return;
     void load();
     void refresh();
   });

@@ -525,6 +525,37 @@ a.game-row:hover {
 .board .die.used {
   opacity: 0.35;
 }
+.board .die.rolling {
+  animation: die-tumble 0.18s ease-in-out infinite alternate;
+}
+.board .die.rolling:nth-of-type(even) {
+  animation-direction: alternate-reverse;
+}
+@keyframes die-tumble {
+  from {
+    transform: rotate(-14deg) translateY(-4px);
+  }
+  to {
+    transform: rotate(14deg) translateY(4px);
+  }
+}
+.board .checker.gliding {
+  animation: checker-glide 0.35s ease-out;
+}
+@keyframes checker-glide {
+  from {
+    transform: translate(var(--dx), var(--dy));
+  }
+  to {
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .board .die.rolling,
+  .board .checker.gliding {
+    animation: none;
+  }
+}
 .board .hit {
   fill: transparent;
 }

@@ -1,13 +1,23 @@
 import { useEffect, useRef } from 'react';
+import type { GameEvent, MovePreview } from '../shared/api';
 import { API_URL, authHeaders } from './api';
 
-type Listener = (data: { id: string; version: number }) => void;
+/**
+ * `game`: a game changed (refetch it). `preview`: checkers moved in a turn not
+ * yet confirmed. `resync`: the stream (re)connected, so refetch everything.
+ */
+export type LiveEvent =
+  | ({ kind: 'game' } & GameEvent)
+  | ({ kind: 'preview' } & MovePreview)
+  | { kind: 'resync' };
+
+type Listener = (event: LiveEvent) => void;
 
 const listeners = new Set<Listener>();
 let controller: AbortController | null = null;
 
-function emit(data: { id: string; version: number }) {
-  for (const l of listeners) l(data);
+function emit(event: LiveEvent) {
+  for (const l of listeners) l(event);
 }
 
 /**
@@ -39,11 +49,11 @@ async function run(signal: AbortSignal) {
           buffer = buffer.slice(end + 2);
           const event = /^event: (.*)$/m.exec(block)?.[1];
           const data = /^data: (.*)$/m.exec(block)?.[1];
-          if (event === 'game' && data) emit(JSON.parse(data));
+          if ((event === 'game' || event === 'preview') && data) emit({ kind: event, ...JSON.parse(data) });
           // After a (re)connect, refetch in case something changed while offline.
           if (event === 'ready') {
             failures = 0;
-            emit({ id: '*', version: -1 });
+            emit({ kind: 'resync' });
           }
         }
       }
@@ -66,10 +76,10 @@ export function closeEvents() {
   controller = null;
 }
 
-/** Call `onChange` whenever one of the signed-in user's games changes. */
-export function useGameEvents(onChange: Listener) {
-  const ref = useRef(onChange);
-  ref.current = onChange;
+/** Call `onEvent` for live activity in any of the signed-in user's games. */
+export function useGameEvents(onEvent: Listener) {
+  const ref = useRef(onEvent);
+  ref.current = onEvent;
   useEffect(() => {
     const l: Listener = (d) => ref.current(d);
     listeners.add(l);
