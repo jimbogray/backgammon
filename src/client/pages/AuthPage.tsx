@@ -3,13 +3,18 @@ import { useLocation } from 'react-router-dom';
 import { api, googleSignInUrl } from '../api';
 import { useAuth } from '../auth';
 
+const GOOGLE_ERRORS: Record<string, string> = {
+  google: 'Google sign-in did not complete. Please try again.',
+  'google-email': 'An account with this email already exists. Please log in with your password.',
+};
+
 export function AuthPage() {
   const { refresh } = useAuth();
   const location = useLocation();
   const params = new URLSearchParams(location.search);
   const [mode, setMode] = useState<'login' | 'signup'>(location.pathname.startsWith('/join/') ? 'signup' : 'login');
   const [google, setGoogle] = useState(false);
-  const [error, setError] = useState(params.get('error') === 'google' ? 'Google sign-in did not complete. Please try again.' : '');
+  const [error, setError] = useState(GOOGLE_ERRORS[params.get('error') ?? ''] ?? '');
   const [busy, setBusy] = useState(false);
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');

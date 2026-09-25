@@ -16,20 +16,38 @@ export interface EventMessage {
  * every API server, each of which calls `receive` and writes to the browsers
  * connected to it. Without one, notices stay in this process.
  */
+/** Open streams one user may hold on one server; a new tab past this closes their oldest. */
+export const MAX_STREAMS_PER_USER = 5;
+/** Open streams one server will hold in total. */
+export const MAX_STREAMS = 2000;
+
 export class EventHub {
   private streams = new Map<number, Set<Response>>();
+  private total = 0;
 
   constructor(private publish?: (message: string) => Promise<void>) {}
 
-  add(userId: number, res: Response): () => void {
+  /** Starts sending this user's notices to `res`. Returns null when the server is full. */
+  add(userId: number, res: Response): (() => void) | null {
     let set = this.streams.get(userId);
+    if (set && set.size >= MAX_STREAMS_PER_USER) {
+      // Newest tab wins. The replaced tab waits a while before reconnecting (see client/events.ts).
+      const oldest = set.values().next().value!;
+      set.delete(oldest);
+      this.total--;
+      oldest.write('event: replaced\ndata: {}\n\n');
+      oldest.end();
+    }
+    if (this.total >= MAX_STREAMS) return null;
     if (!set) {
       set = new Set();
       this.streams.set(userId, set);
     }
     set.add(res);
+    this.total++;
     return () => {
-      set!.delete(res);
+      if (!set!.delete(res)) return;
+      this.total--;
       if (set!.size === 0) this.streams.delete(userId);
     };
   }
