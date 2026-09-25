@@ -1,15 +1,9 @@
 import { useEffect, useRef } from 'react';
-import type { GameEvent, MovePreview } from '../shared/api';
+import type { GameEvent } from '../shared/api';
 import { API_URL, authHeaders } from './api';
 
-/**
- * `game`: a game changed (refetch it). `preview`: checkers moved in a turn not
- * yet confirmed. `resync`: the stream (re)connected, so refetch everything.
- */
-export type LiveEvent =
-  | ({ kind: 'game' } & GameEvent)
-  | ({ kind: 'preview' } & MovePreview)
-  | { kind: 'resync' };
+/** `game`: a game changed (refetch it). `resync`: the stream (re)connected, so refetch everything. */
+export type LiveEvent = ({ kind: 'game' } & GameEvent) | { kind: 'resync' };
 
 type Listener = (event: LiveEvent) => void;
 
@@ -49,7 +43,7 @@ async function run(signal: AbortSignal) {
           buffer = buffer.slice(end + 2);
           const event = /^event: (.*)$/m.exec(block)?.[1];
           const data = /^data: (.*)$/m.exec(block)?.[1];
-          if ((event === 'game' || event === 'preview') && data) emit({ kind: event, ...JSON.parse(data) });
+          if (event === 'game' && data) emit({ kind: 'game', ...JSON.parse(data) });
           // The user opened more tabs than the API streams to; newer tabs take over.
           if (event === 'replaced') failures = 5;
           // After a (re)connect, refetch in case something changed while offline.

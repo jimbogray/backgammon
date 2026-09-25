@@ -44,8 +44,7 @@ export function Lobby() {
   // batch them into at most one refetch every 2s (the API allows 300 requests a minute per user).
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
-  useGameEvents((e) => {
-    if (e.kind === 'preview') return;
+  useGameEvents(() => {
     if (timer.current) return;
     timer.current = setTimeout(() => {
       timer.current = null;

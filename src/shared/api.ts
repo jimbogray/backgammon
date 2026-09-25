@@ -36,17 +36,9 @@ export interface GameEvent {
   id: string;
   version: number;
   /** What changed it, when a player acted (absent when a game starts). */
-  action?: { type: Action['type']; by: Color };
+  action?: { type: Action['type']; by: Color; /** For a move: the checkers it moved, in order. */ moves?: Move[] };
 }
 
-/** Live notice of the checkers a player has moved so far in a turn they haven't confirmed yet. */
-export interface MovePreview {
-  id: string;
-  /** The game version the moves were made from. */
-  version: number;
-  by: Color;
-  moves: Move[];
-}
 
 /** A started game as listed on the matches screen, for anyone to watch. */
 export interface MatchSummary {
