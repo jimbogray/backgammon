@@ -577,6 +577,11 @@ a.game-row:hover {
 .board .die.used {
   opacity: 0.35;
 }
+.board .dice-count {
+  font-size: 16px;
+  font-weight: 700;
+  fill: #f7f3ea;
+}
 .board .die.rolling {
   animation: die-tumble 0.18s ease-in-out infinite alternate;
 }
