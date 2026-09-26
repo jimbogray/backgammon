@@ -577,6 +577,27 @@ a.game-row:hover {
 .board .die.used {
   opacity: 0.35;
 }
+.board .dice.ready {
+  cursor: pointer;
+  outline: none;
+}
+.board .dice-target {
+  fill: transparent;
+}
+.board .dice.ready .die rect {
+  stroke: #f0b429;
+  stroke-width: 3;
+  animation: dice-ready 1.4s ease-in-out infinite;
+}
+.board .dice.ready:hover .die rect,
+.board .dice.ready:focus-visible .die rect {
+  stroke-width: 5;
+}
+@keyframes dice-ready {
+  50% {
+    stroke-opacity: 0.35;
+  }
+}
 .board .die.rolling {
   animation: die-tumble 0.18s ease-in-out infinite alternate;
 }
@@ -604,6 +625,7 @@ a.game-row:hover {
 }
 @media (prefers-reduced-motion: reduce) {
   .board .die.rolling,
+  .board .dice.ready .die rect,
   .board .checker.gliding {
     animation: none;
   }
