@@ -230,21 +230,33 @@ export function Board({ board, you, dice, remaining, diceColor, rolling, motion,
   // Dice sit in the right half, between the two rows.
   const diceEls: React.ReactElement[] = [];
   if (dice) {
-    const values = dice[0] === dice[1] ? [dice[0], dice[0], dice[0], dice[0]] : dice;
-    const size = values.length === 4 ? 34 : 44;
+    // A double still shows as two dice; the four moves it gives are counted beside them.
+    const values = dice.slice(0, 2);
+    const double = values[0] === values[1];
+    const size = 44;
     const gap = 10;
     const total = values.length * size + (values.length - 1) * gap;
-    let unused = remaining ? remaining.slice() : values.slice();
-    // Mark dice as used left-to-right, matching values still remaining.
-    const usedFlags = values.map((v) => {
-      const k = unused.indexOf(v);
-      if (k >= 0) {
-        unused = [...unused.slice(0, k), ...unused.slice(k + 1)];
-        return false;
-      }
-      return true;
-    });
+    let unused = remaining ? remaining.slice() : double ? [values[0], values[0], values[0], values[0]] : values.slice();
+    // Mark dice as used left-to-right, matching values still remaining. For a
+    // double, the first die dims once two of its four moves are played.
+    const usedFlags = double
+      ? [unused.length <= 2, unused.length === 0]
+      : values.map((v) => {
+          const k = unused.indexOf(v);
+          if (k >= 0) {
+            unused = [...unused.slice(0, k), ...unused.slice(k + 1)];
+            return false;
+          }
+          return true;
+        });
     const startX = diceColor === you ? RIGHT_X + (6 * PW - total) / 2 : F + (6 * PW - total) / 2;
+    if (double && !rolling && unused.length > 0) {
+      diceEls.push(
+        <text key="moves-left" x={startX + total + 8} y={H / 2 + 6} className="dice-count">
+          ×{unused.length}
+        </text>,
+      );
+    }
     values.forEach((v, i) =>
       diceEls.push(
         <Die

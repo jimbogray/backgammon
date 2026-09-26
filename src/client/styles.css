@@ -581,6 +581,11 @@ a.game-row:hover {
   cursor: pointer;
   outline: none;
 }
+.board .dice-count {
+  font-size: 16px;
+  font-weight: 700;
+  fill: #f7f3ea;
+}
 .board .dice-target {
   fill: transparent;
 }
