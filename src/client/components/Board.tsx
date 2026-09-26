@@ -22,8 +22,6 @@ interface Props {
   /** Shake the dice while a roll is under way. */
   rolling?: boolean;
   motion?: Motion | null;
-  /** Set when it's the viewer's turn to roll: the dice are shown ready and clicking them rolls. */
-  onRoll?: () => void;
   cube: { value: number; owner: Color | null };
   selected: Spot | null;
   sources: Set<Spot>;
@@ -114,7 +112,7 @@ function Die({ x, y, size, value, color, used, rolling }: { x: number; y: number
   );
 }
 
-export function Board({ board, you, dice, remaining, diceColor, rolling, motion, onRoll, cube, selected, sources, targets, recent, onSpotClick }: Props) {
+export function Board({ board, you, dice, remaining, diceColor, rolling, motion, cube, selected, sources, targets, recent, onSpotClick }: Props) {
   const them = opponent(you);
 
   // The checker that just moved starts at its old spot and glides to the top of its new stack.
@@ -288,28 +286,7 @@ export function Board({ board, you, dice, remaining, diceColor, rolling, motion,
           {cubeLabel}
         </text>
       </g>
-      {onRoll ? (
-        <g
-          className="dice ready"
-          role="button"
-          tabIndex={0}
-          aria-label="Roll the dice"
-          onClick={onRoll}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onRoll();
-            }
-          }}
-        >
-          <title>Roll the dice</title>
-          {/* The gaps between the dice are part of the target too. */}
-          <rect x={diceColor === you ? RIGHT_X : F} y={H / 2 - 40} width={6 * PW} height={80} className="dice-target" />
-          {diceEls}
-        </g>
-      ) : (
-        diceEls
-      )}
+      {diceEls}
       {checkers}
       {hits}
       <rect
