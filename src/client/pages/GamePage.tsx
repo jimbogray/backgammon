@@ -32,6 +32,9 @@ function describeTurn(turn: TurnRecord, name: string): string {
   return `${name} rolled ${roll}: ${turn.moves.map((m) => notation(turn.color, m)).join(' ')}`;
 }
 
+/** What the dice show while they wait to be rolled. */
+const READY_FACES = [5, 3];
+
 /** How long the dice tumble when the server doesn't say (it picks about two seconds per roll). */
 const ROLL_MS = 2000;
 
@@ -292,7 +295,7 @@ export function GamePage() {
   } else if (state.turn !== you) {
     prompt = state.phase === 'rolling' ? `Waiting for ${names[them]} to roll.` : `Waiting for ${names[them]} to move.`;
   } else if (state.phase === 'rolling') {
-    prompt = 'Your turn. Roll the dice.';
+    prompt = 'Your turn. Tap the dice or press Roll dice.';
   } else if (selected !== null) {
     prompt = 'Choose where to move the checker.';
   } else {
@@ -309,17 +312,21 @@ export function GamePage() {
 
   // Dice: tumbling during a roll, else this turn's roll, else a roll that couldn't be played.
   const unplayable = !state.dice && state.phase === 'rolling' && state.lastTurn?.moves.length === 0 ? state.lastTurn : null;
-  const dice = roll ? roll.faces : (state.dice ?? unplayable?.dice ?? null);
-  const diceColor = roll ? roll.color : unplayable && !state.dice ? unplayable.color : state.turn;
+  // On your turn to roll, the dice wait on your side of the board; touching them rolls.
+  const canRoll = !roll && !busy && state.phase === 'rolling' && state.turn === you;
+  const dice = roll ? roll.faces : canRoll ? READY_FACES : (state.dice ?? unplayable?.dice ?? null);
+  const diceColor = roll ? roll.color : canRoll ? seat : unplayable && !state.dice ? unplayable.color : state.turn;
   const remaining = roll
     ? null
     : myMoving
       ? (turnInfo?.progress.remaining ?? null)
-      : state.phase === 'moving'
-        ? turnSoFar(state, state.turn).remaining
-        : unplayable && !state.dice
-          ? []
-          : null;
+      : canRoll
+        ? null
+        : state.phase === 'moving'
+          ? turnSoFar(state, state.turn).remaining
+          : unplayable && !state.dice
+            ? []
+            : null;
   const playedThisTurn = state.phase === 'moving' ? (state.played ?? []) : [];
 
   return (
@@ -349,6 +356,7 @@ export function GamePage() {
             diceColor={diceColor}
             rolling={Boolean(roll)}
             motion={motion}
+            onRoll={canRoll ? () => void act({ type: 'roll' }) : undefined}
             cube={state.cube}
             selected={selected}
             sources={sources}

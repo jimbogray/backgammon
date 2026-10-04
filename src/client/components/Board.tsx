@@ -23,6 +23,8 @@ interface Props {
   /** Spin the dice while a roll is under way. */
   rolling?: boolean;
   motion?: Motion | null;
+  /** Set when it's the viewer's turn to roll: the dice wait on their side and touching them rolls. */
+  onRoll?: () => void;
   cube: { value: number; owner: Color | null };
   selected: Spot | null;
   sources: Set<Spot>;
@@ -158,7 +160,7 @@ function Die({ x, y, size, value, color, used, rolling, index }: { x: number; y:
   );
 }
 
-export function Board({ board, you, dice, remaining, diceColor, rolling, motion, cube, selected, sources, targets, recent, onSpotClick }: Props) {
+export function Board({ board, you, dice, remaining, diceColor, rolling, motion, onRoll, cube, selected, sources, targets, recent, onSpotClick }: Props) {
   const them = opponent(you);
 
   // The checker that just moved starts at its old spot and glides to the top of its new stack.
@@ -359,8 +361,26 @@ export function Board({ board, you, dice, remaining, diceColor, rolling, motion,
           <title>Bear off</title>
         </rect>
       </svg>
-      <div className="dice-layer" aria-hidden="true">
-        {diceEls}
+      <div className="dice-layer">
+        {onRoll && (
+          <button
+            type="button"
+            className="dice-ready"
+            aria-label="Roll the dice"
+            title="Roll the dice"
+            onClick={onRoll}
+            style={{
+              // The whole strip between the two rows on your side is the target, gaps between the dice included.
+              left: `${((diceColor === you ? RIGHT_X : F) / W) * 100}%`,
+              top: `${((H / 2 - 40) / H) * 100}%`,
+              width: `${((6 * PW) / W) * 100}%`,
+              height: `${(80 / H) * 100}%`,
+            }}
+          />
+        )}
+        <div className="dice" aria-hidden="true">
+          {diceEls}
+        </div>
       </div>
     </div>
   );

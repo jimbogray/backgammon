@@ -572,6 +572,38 @@ a.game-row:hover {
   inset: 0;
   pointer-events: none;
 }
+.dice-ready {
+  position: absolute;
+  pointer-events: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.dice-ready:focus-visible {
+  outline: 2px solid #f0b429;
+  outline-offset: 2px;
+}
+/* Dice waiting to be rolled glow gold, and lift a little under the pointer. */
+.dice-ready ~ .dice .die3d-face {
+  animation: dice-ready 1.4s ease-in-out infinite;
+}
+.dice-ready:hover ~ .dice .die3d-hop,
+.dice-ready:focus-visible ~ .dice .die3d-hop {
+  transform: translateY(-10%) rotateX(-14deg) rotateY(16deg);
+}
+.dice-ready:active ~ .dice .die3d-hop {
+  transform: translateY(4%) rotateX(-14deg) rotateY(16deg);
+}
+@keyframes dice-ready {
+  50% {
+    box-shadow:
+      inset 0 0 0 calc(var(--size) * 0.03) var(--face-edge),
+      0 0 calc(var(--size) * 0.25) #f0b429;
+  }
+}
 .die3d {
   --half: calc(var(--size) / 2);
   position: absolute;
@@ -609,6 +641,7 @@ a.game-row:hover {
 /* At rest the die leans a little so its sides show, with the rolled face on top. */
 .die3d-hop {
   transform: rotateX(-14deg) rotateY(16deg);
+  transition: transform 0.15s ease-out;
 }
 .die3d-cube {
   transform: rotateX(var(--rx)) rotateY(var(--ry));
@@ -734,6 +767,7 @@ a.game-row:hover {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .dice-ready ~ .dice .die3d-face,
   .die3d .die3d-cube,
   .die3d .die3d-hop,
   .die3d .die3d-shadow,
