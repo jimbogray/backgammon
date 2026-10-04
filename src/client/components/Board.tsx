@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type React from 'react';
 import type { Board as BoardState, Color, Move } from '../../shared/engine';
 import { countAt, opponent } from '../../shared/engine';
@@ -19,7 +20,7 @@ interface Props {
   /** Dice values still unused this turn (for dimming used dice). */
   remaining: number[] | null;
   diceColor: Color;
-  /** Shake the dice while a roll is under way. */
+  /** Spin the dice while a roll is under way. */
   rolling?: boolean;
   motion?: Motion | null;
   cube: { value: number; owner: Color | null };
@@ -101,14 +102,59 @@ const PIPS: Record<number, Array<[number, number]>> = {
   6: [[0.25, 0.25], [0.75, 0.25], [0.25, 0.5], [0.75, 0.5], [0.25, 0.75], [0.75, 0.75]],
 };
 
-function Die({ x, y, size, value, color, used, rolling }: { x: number; y: number; size: number; value: number; color: Color; used: boolean; rolling?: boolean }) {
+/** Which face sits on each side of the cube (opposite faces add up to 7), and the turn that brings it to the front. */
+const FACES: Array<{ value: number; side: string; rx: number; ry: number }> = [
+  { value: 1, side: 'front', rx: 0, ry: 0 },
+  { value: 6, side: 'back', rx: 0, ry: 180 },
+  { value: 3, side: 'right', rx: 0, ry: -90 },
+  { value: 4, side: 'left', rx: 0, ry: 90 },
+  { value: 2, side: 'top', rx: -90, ry: 0 },
+  { value: 5, side: 'bottom', rx: 90, ry: 0 },
+];
+
+/**
+ * A die drawn as a CSS 3D cube over the board. It spins while a roll is under
+ * way and, once the roll is in, tumbles to a stop showing `value`.
+ */
+function Die({ x, y, size, value, color, used, rolling, index }: { x: number; y: number; size: number; value: number; color: Color; used: boolean; rolling?: boolean; index: number }) {
+  // Land when a roll finishes, but not when the board first shows existing dice.
+  const [wasRolling, setWasRolling] = useState(Boolean(rolling));
+  const [landing, setLanding] = useState(false);
+  if (Boolean(rolling) !== wasRolling) {
+    setWasRolling(Boolean(rolling));
+    setLanding(!rolling);
+  }
+  const face = FACES.find((f) => f.value === value) ?? FACES[0];
+  const state = rolling ? 'rolling' : landing ? 'landing' : '';
   return (
-    <g className={`die ${color} ${used ? 'used' : ''} ${rolling ? 'rolling' : ''}`} style={{ transformOrigin: `${x + size / 2}px ${y + size / 2}px` }}>
-      <rect x={x} y={y} width={size} height={size} rx={size * 0.18} />
-      {PIPS[value].map(([px, py], i) => (
-        <circle key={i} cx={x + px * size} cy={y + py * size} r={size * 0.09} />
-      ))}
-    </g>
+    <div
+      className={`die3d ${color} ${used ? 'used' : ''} ${state} ${index % 2 ? 'odd' : ''}`}
+      style={
+        {
+          left: `${(x / W) * 100}%`,
+          top: `${(y / H) * 100}%`,
+          '--size': `calc(${size} * 100cqw / ${W})`,
+          '--rx': `${face.rx}deg`,
+          '--ry': `${face.ry}deg`,
+        } as React.CSSProperties
+      }
+      onAnimationEnd={(e) => {
+        if (e.animationName === 'die-land') setLanding(false);
+      }}
+    >
+      <div className="die3d-shadow" />
+      <div className="die3d-hop">
+        <div className="die3d-cube">
+          {FACES.map((f) => (
+            <div key={f.side} className={`die3d-face ${f.side}`}>
+              {PIPS[f.value].map(([px, py], i) => (
+                <span key={i} className="pip" style={{ left: `${px * 100}%`, top: `${py * 100}%` }} />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -227,6 +273,7 @@ export function Board({ board, you, dice, remaining, diceColor, rolling, motion,
 
   // Dice sit in the right half, between the two rows.
   const diceEls: React.ReactElement[] = [];
+  let diceCount: React.ReactElement | null = null;
   if (dice) {
     // A double still shows as two dice; the four moves it gives are counted beside them.
     const values = dice.slice(0, 2);
@@ -249,10 +296,10 @@ export function Board({ board, you, dice, remaining, diceColor, rolling, motion,
         });
     const startX = diceColor === you ? RIGHT_X + (6 * PW - total) / 2 : F + (6 * PW - total) / 2;
     if (double && !rolling && unused.length > 0) {
-      diceEls.push(
-        <text key="moves-left" x={startX + total + 8} y={H / 2 + 6} className="dice-count">
+      diceCount = (
+        <text x={startX + total + 8} y={H / 2 + 6} className="dice-count">
           ×{unused.length}
-        </text>,
+        </text>
       );
     }
     values.forEach((v, i) =>
@@ -266,49 +313,55 @@ export function Board({ board, you, dice, remaining, diceColor, rolling, motion,
           color={diceColor}
           used={usedFlags[i]}
           rolling={rolling}
+          index={i}
         />,
       ),
     );
   }
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="board" role="img" aria-label="Backgammon board">
-      <rect x={0} y={0} width={W} height={H} rx={10} className="frame" />
-      <rect x={F} y={TOP} width={6 * PW} height={H - 2 * F} className="felt" />
-      <rect x={RIGHT_X} y={TOP} width={6 * PW} height={H - 2 * F} className="felt" />
-      <rect x={BAR_X} y={0} width={BAR_W} height={H} className="bar" />
-      <rect x={TRAY_X} y={TOP} width={TRAY_W - 6} height={H - 2 * F} rx={4} className={`tray ${targets.has('off') ? 'target' : ''}`} />
-      {points}
-      {tray}
-      <g className="cube">
-        <rect x={TRAY_X + 14} y={cubeY} width={36} height={36} rx={6} />
-        <text x={TRAY_X + 32} y={cubeY + 24} textAnchor="middle">
-          {cubeLabel}
-        </text>
-      </g>
-      {diceEls}
-      {checkers}
-      {hits}
-      <rect
-        x={BAR_X}
-        y={H / 2}
-        width={BAR_W}
-        height={H / 2}
-        className={`hit ${sources.has('bar') ? 'clickable' : ''}`}
-        data-role={sources.has('bar') ? 'source' : undefined}
-        onClick={() => onSpotClick('bar')}
-      />
-      <rect
-        x={TRAY_X}
-        y={H / 2}
-        width={TRAY_W}
-        height={H / 2 - F}
-        className={`hit ${targets.has('off') ? 'clickable' : ''}`}
-        data-role={targets.has('off') ? 'target' : undefined}
-        onClick={() => onSpotClick('off')}
-      >
-        <title>Bear off</title>
-      </rect>
-    </svg>
+    <div className="board-stage">
+      <svg viewBox={`0 0 ${W} ${H}`} className="board" role="img" aria-label="Backgammon board">
+        <rect x={0} y={0} width={W} height={H} rx={10} className="frame" />
+        <rect x={F} y={TOP} width={6 * PW} height={H - 2 * F} className="felt" />
+        <rect x={RIGHT_X} y={TOP} width={6 * PW} height={H - 2 * F} className="felt" />
+        <rect x={BAR_X} y={0} width={BAR_W} height={H} className="bar" />
+        <rect x={TRAY_X} y={TOP} width={TRAY_W - 6} height={H - 2 * F} rx={4} className={`tray ${targets.has('off') ? 'target' : ''}`} />
+        {points}
+        {tray}
+        <g className="cube">
+          <rect x={TRAY_X + 14} y={cubeY} width={36} height={36} rx={6} />
+          <text x={TRAY_X + 32} y={cubeY + 24} textAnchor="middle">
+            {cubeLabel}
+          </text>
+        </g>
+        {diceCount}
+        {checkers}
+        {hits}
+        <rect
+          x={BAR_X}
+          y={H / 2}
+          width={BAR_W}
+          height={H / 2}
+          className={`hit ${sources.has('bar') ? 'clickable' : ''}`}
+          data-role={sources.has('bar') ? 'source' : undefined}
+          onClick={() => onSpotClick('bar')}
+        />
+        <rect
+          x={TRAY_X}
+          y={H / 2}
+          width={TRAY_W}
+          height={H / 2 - F}
+          className={`hit ${targets.has('off') ? 'clickable' : ''}`}
+          data-role={targets.has('off') ? 'target' : undefined}
+          onClick={() => onSpotClick('off')}
+        >
+          <title>Bear off</title>
+        </rect>
+      </svg>
+      <div className="dice-layer" aria-hidden="true">
+        {diceEls}
+      </div>
+    </div>
   );
 }

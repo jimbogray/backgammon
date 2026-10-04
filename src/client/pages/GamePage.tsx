@@ -41,8 +41,9 @@ function randomFaces(): number[] {
 
 /**
  * Tumbling dice shown while a roll is under way, on the roller's screen and
- * on every other screen watching the game. The faces flicker fast at first and
- * slow down as the roll settles, for a bit of suspense.
+ * on every other screen watching the game. The dice spin in 3D until the roll
+ * ends, then land on the server's roll. Where motion is reduced, the faces
+ * flicker instead, fast at first and slowing as the roll settles.
  */
 function useRollAnimation() {
   const [roll, setRoll] = useState<{ color: Color; faces: number[] } | null>(null);

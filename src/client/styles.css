@@ -557,43 +557,169 @@ a.game-row:hover {
   font-size: 16px;
   fill: #222;
 }
-.board .die rect {
-  stroke-width: 1.5;
-}
-.board .die.white rect {
-  fill: #fbf7ee;
-  stroke: #8a7a5a;
-}
-.board .die.white circle {
-  fill: #222;
-}
-.board .die.black rect {
-  fill: #2a2826;
-  stroke: #000;
-}
-.board .die.black circle {
-  fill: #f2ebdd;
-}
-.board .die.used {
-  opacity: 0.35;
-}
 .board .dice-count {
   font-size: 16px;
   font-weight: 700;
   fill: #f7f3ea;
 }
-.board .die.rolling {
-  animation: die-tumble 0.18s ease-in-out infinite alternate;
+/* Dice are CSS 3D cubes laid over the board, sized in board units via the stage's width. */
+.board-stage {
+  position: relative;
+  container-type: inline-size;
 }
-.board .die.rolling:nth-of-type(even) {
-  animation-direction: alternate-reverse;
+.dice-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
-@keyframes die-tumble {
+.die3d {
+  --half: calc(var(--size) / 2);
+  position: absolute;
+  width: var(--size);
+  height: var(--size);
+  perspective: calc(var(--size) * 6);
+  transition: opacity 0.2s;
+}
+.die3d.used {
+  opacity: 0.35;
+}
+.die3d.white {
+  --face: #fbf7ee;
+  --face-edge: #d9cfb8;
+  --pip: #222;
+}
+.die3d.black {
+  --face: #34312e;
+  --face-edge: #121110;
+  --pip: #f2ebdd;
+}
+.die3d-shadow {
+  position: absolute;
+  inset: 12% 4% -10% 10%;
+  border-radius: 30%;
+  background: rgba(0, 0, 0, 0.35);
+  filter: blur(calc(var(--size) * 0.08));
+}
+.die3d-hop,
+.die3d-cube {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+}
+/* At rest the die leans a little so its sides show, with the rolled face on top. */
+.die3d-hop {
+  transform: rotateX(-14deg) rotateY(16deg);
+}
+.die3d-cube {
+  transform: rotateX(var(--rx)) rotateY(var(--ry));
+}
+.die3d-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 16%;
+  background: radial-gradient(circle at 35% 30%, var(--face) 55%, var(--face-edge));
+  box-shadow: inset 0 0 0 calc(var(--size) * 0.03) var(--face-edge);
+  backface-visibility: hidden;
+}
+.die3d-face.front {
+  transform: translateZ(var(--half));
+}
+.die3d-face.back {
+  transform: rotateY(180deg) translateZ(var(--half));
+}
+.die3d-face.right {
+  transform: rotateY(90deg) translateZ(var(--half));
+}
+.die3d-face.left {
+  transform: rotateY(-90deg) translateZ(var(--half));
+}
+.die3d-face.top {
+  transform: rotateX(90deg) translateZ(var(--half));
+}
+.die3d-face.bottom {
+  transform: rotateX(-90deg) translateZ(var(--half));
+}
+.die3d-face .pip {
+  position: absolute;
+  width: 18%;
+  height: 18%;
+  border-radius: 50%;
+  background: var(--pip);
+  transform: translate(-50%, -50%);
+}
+.die3d.rolling .die3d-cube {
+  animation: die-spin 0.55s linear infinite;
+}
+.die3d.rolling.odd .die3d-cube {
+  animation: die-spin-alt 0.65s linear infinite;
+}
+.die3d.rolling .die3d-hop {
+  animation: die-hop 0.42s ease-in-out infinite alternate;
+}
+.die3d.rolling.odd .die3d-hop {
+  animation-duration: 0.5s;
+}
+.die3d.rolling .die3d-shadow {
+  animation: die-shadow 0.42s ease-in-out infinite alternate;
+}
+.die3d.rolling.odd .die3d-shadow {
+  animation-duration: 0.5s;
+}
+/* Landing: carry on tumbling from a turn and a half away, slowing onto the real roll. */
+.die3d.landing .die3d-cube {
+  animation: die-land 0.7s cubic-bezier(0.15, 0.7, 0.3, 1);
+}
+.die3d.landing.odd .die3d-cube {
+  animation-name: die-land-alt;
+}
+@keyframes die-spin {
   from {
-    transform: rotate(-14deg) translateY(-4px);
+    transform: rotateX(0deg) rotateY(0deg);
   }
   to {
-    transform: rotate(14deg) translateY(4px);
+    transform: rotateX(360deg) rotateY(720deg);
+  }
+}
+@keyframes die-spin-alt {
+  from {
+    transform: rotateX(0deg) rotateY(0deg);
+  }
+  to {
+    transform: rotateX(-720deg) rotateY(360deg);
+  }
+}
+@keyframes die-hop {
+  from {
+    transform: translateY(8%) rotateX(-14deg) rotateY(16deg);
+  }
+  to {
+    transform: translateY(-28%) rotateX(-14deg) rotateY(16deg);
+  }
+}
+@keyframes die-shadow {
+  from {
+    transform: scale(1);
+    opacity: 1;
+  }
+  to {
+    transform: scale(0.8) translateY(10%);
+    opacity: 0.55;
+  }
+}
+@keyframes die-land {
+  from {
+    transform: rotateX(calc(var(--rx) + 360deg)) rotateY(calc(var(--ry) + 540deg));
+  }
+  to {
+    transform: rotateX(var(--rx)) rotateY(var(--ry));
+  }
+}
+@keyframes die-land-alt {
+  from {
+    transform: rotateX(calc(var(--rx) - 540deg)) rotateY(calc(var(--ry) + 360deg));
+  }
+  to {
+    transform: rotateX(var(--rx)) rotateY(var(--ry));
   }
 }
 .board .checker.gliding {
@@ -608,7 +734,9 @@ a.game-row:hover {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .board .die.rolling,
+  .die3d .die3d-cube,
+  .die3d .die3d-hop,
+  .die3d .die3d-shadow,
   .board .checker.gliding {
     animation: none;
   }
